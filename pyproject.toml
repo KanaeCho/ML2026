@@ -1,0 +1,23 @@
+[project]
+name = "ml2026"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "accelerate>=1.13.0",
+    "datasets>=4.7.0",
+    "geoparse>=2.0.4",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.2",
+    "pandas>=3.0.0",
+    "protobuf>=7.34.0",
+    "pyranges>=0.1.4",
+    "pyside6>=6.10.2",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.0",
+    "sentencepiece>=0.2.1",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "tqdm>=4.67.3",
+]
