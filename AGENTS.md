@@ -57,17 +57,33 @@
 - `apply_integration_hard_qc.py`: 在单样本 `pass_qc` 结果上追加统一 hard-QC。
 - `merge_integration_matrices.py`: 严格检查 feature 一致性后合并多样本矩阵。
 - `build_integration_sketch.py`: 从各样本 `integration_qc` 结果中均衡抽样，构建 sketch 输入。
+- `filter_integration_cells.py`: 基于整合后注释 metadata 按指定列过滤细胞，生成新的 merged 输入目录。
 - `run_batch_integration.R`: 对 sketch 或全量 merged 输入运行 TF-IDF、LSI、Harmony、UMAP、聚类和整合质量评估。
+- `run_single_sample_umap.R`: 基于已有单样本 `*_seurat_qc.rds` 对 hard-QC 前的 `pass_qc` 细胞重建单样本 LSI / UMAP / 聚类，并可叠加 GEO 标签映射或 scRNA->scATAC label transfer 结果。
 - `annotate_integration_celltypes.R`: 基于整合结果中的 cluster，为细胞追加 broad cell type / subtype 标注。
+- `de_novo_annotate_integration_celltypes.py`: 仅基于当前 cluster marker peaks、UMAP 邻近关系和样本偏置，重算一版 de novo 细胞类型注释表。
+- `review_celltype_annotation_validation.py`: 基于当前整合结果、cluster marker 和样本组成，输出注释验证汇总与人工复核报告。
 - `review_hard_qc_and_integration_readiness.py`: 汇总 hard-QC 前后表现，生成整合准备报告。
 - `pipeline.py`: Python 流程管理入口，负责样本发现、调度和日志。
 - `download_from_datasets.py`: 从 `datasets.xlsx` 过滤样本并组织 GEO supplementary 下载任务。
+- `export_h5ad_obs.py`: 将 GEO 提供的 `.h5ad` 文件中的 `obs` 元数据导出为 CSV/CSV.GZ，供单样本标签映射使用。
 
 ## 当前文件分工
 - `process_single_sample.R`
   - 输入：`GSE`、`GSM`
   - 行为：自动发现 fragment 和 barcode 文件，运行单样本 QC，保存最终产物
   - 输出目录：`output/{GSE}/{GSM}`
+
+- `run_single_sample_umap.R`
+  - 用途：读取已有 `output/{GSE}/{GSM}/{GSM}_seurat_qc.rds`，仅对 `pass_qc` 细胞运行单样本 TF-IDF、LSI、聚类和 UMAP
+  - 当前支持：
+    - 直接读取外部注释 CSV，按 barcode/sample 映射 GEO 细胞类型并绘制单样本 UMAP
+    - 使用外部 scRNA Seurat reference RDS 做 `GeneActivity + FindTransferAnchors/TransferData` 的 RNA->ATAC 标签转移
+  - 当前输出：
+    - `single_sample_umap_by_cluster.png`
+    - `single_sample_umap_by_qc.png`
+    - `single_sample_umap_metadata.csv.gz`
+    - 如提供参考标签，还会额外输出按 GEO label 或 transferred label 着色的 UMAP 图和 `single_sample_umap_report.md`
 
 - `regenerate_qc_overview.R`
   - 用途：只重绘总 QC 图，不重跑整套单样本 QC
@@ -86,20 +102,67 @@
   - 当前默认：每样本抽取 `1000` 个细胞
   - 输出：`output/integration_sketch/`
 
+- `filter_integration_cells.py`
+  - 用途：基于已有整合后注释结果，对 `integration_merged/` 的 cell 子集做过滤，并重建新的 merged 输入目录
+  - 当前可用于删除 `celltype == Unknown / non-PBMC-like` 的细胞，再重跑整合
+  - 当前也支持按 `seurat_clusters` 整群排除，或按 `scDblFinder.score` 做全局/cluster 定向细胞剔除，用于敏感性重跑
+  - 输入：
+    - `output/integration_merged/`
+    - `output/integration_merged_analysis/integrated_metadata_celltyped.csv.gz`
+  - 输出：例如 `output/integration_merged_without_unknown/`
+
 - `run_batch_integration.R`
   - 用途：对 sketch 或全量 merged 输入运行正式整合与质量评估
   - 当前方法：`Signac + Seurat + harmony`
   - 当前默认：按 peak 可及细胞数筛选 top `30000` 个 peaks
+  - 当前支持通过 `--drop-lsi-dims` 或自动 QC 相关性规则，从 downstream Harmony / 邻居图 / UMAP 中排除受 QC 污染的 LSI 维度
+  - 当前支持：`--skip-mixing-metrics`，用于在只关心重整合 / 聚类 / UMAP 时跳过 batch mixing 计算
   - 输出：`output/integration_sketch_analysis/` 或 `output/integration_merged_analysis/`
+
+- `diagnose_bridge_clusters.py`
+  - 用途：基于整合后的 `integrated_metadata.csv.gz`、残余 `scDblFinder.score`、QC 指标、batch 构成和注释验证结果，生成 bridge / dirty cluster 诊断报告
+  - 当前输出：
+    - `bridge_cluster_diagnostic_summary.csv`
+    - `bridge_candidate_doublet_cells.csv.gz`
+    - `bridge_diagnostic_report.md`
+    - `bridge_diagnostic_summary.json`
 
 - `annotate_integration_celltypes.R`
   - 用途：在整合结果的 `integrated_metadata.csv.gz` 基础上追加细胞类型标签
+  - 当前支持：
+    - 直接使用内置的 `cluster -> celltype/subtype` 映射
+    - 通过 `--reference-metadata` 基于共享 `global_cell_id` 对重整合后的新 cluster 做多数票标签转移
+    - 通过 `--annotation-map` 读取外部注释表，并通过 `--output-suffix` 输出平行版本结果而不覆盖原文件
+    - broad cell type UMAP 使用固定颜色映射，保证不同注释版本之间同名 celltype 颜色一致，便于横向对比
   - 输出：
     - `cluster_celltype_annotation_map.csv`
     - `integrated_metadata_celltyped.csv.gz`
     - `post_harmony_umap_by_celltype.png`
     - `post_harmony_umap_by_celltype_subtype.png`
     - `celltype_annotation_notes.md`
+
+- `de_novo_annotate_integration_celltypes.py`
+  - 用途：不使用旧人工标签，仅依据当前 `cluster_top_accessible_peaks.csv` 的 nearest genes、当前 UMAP cluster 邻近关系和样本偏置，生成一版 de novo 注释建议
+  - 输入：
+    - `cluster_top_accessible_peaks.csv`
+    - `integrated_metadata.csv.gz`
+    - `cluster_by_sample_counts.csv`
+  - 输出：
+    - `cluster_celltype_annotation_map_de_novo.csv`
+    - `cluster_marker_annotation_scores_de_novo.csv`
+    - `celltype_annotation_notes_de_novo.md`
+    - 可配合 `annotate_integration_celltypes.R --annotation-map ... --output-suffix _de_novo` 生成 `integrated_metadata_celltyped_de_novo.csv.gz` 和对应 UMAP 图
+
+- `review_celltype_annotation_validation.py`
+  - 用途：复核当前 celltype/subtype 注释是否受到 marker 不支持、样本偏置或旧标签混合的影响
+  - 输入：
+    - `integrated_metadata.csv.gz`
+    - `cluster_celltype_annotation_map.csv`
+    - `cluster_top_accessible_peaks.csv`
+    - `cluster_annotation_reference_overlap.csv`（如果存在）
+  - 输出：
+    - `cluster_annotation_validation_summary.csv`
+    - `annotation_validation_report.md`
 
 - `review_hard_qc_and_integration_readiness.py`
   - 用途：复核 hard-QC 固定阈值在全队列上的实际效果，并输出整合准备报告
@@ -111,6 +174,9 @@
 - `download_from_datasets.py`
   - 当前默认过滤：`scATAC` + `fragment`
   - 当前支持通过 `--file-kinds` 指定 GEO 文件类别，例如 `fragment`、`barcode`、`singlecell`、`summary`
+
+- `export_h5ad_obs.py`
+  - 用途：从 GEO 的 `.h5ad` processed object 中提取 `obs` 级别注释，导出为后续 `run_single_sample_umap.R --annotation-csv` 可用的表格
 
 ## 单样本处理流程
 1. 读取样本参数。

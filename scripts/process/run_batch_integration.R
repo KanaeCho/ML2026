@@ -50,9 +50,51 @@ write_json <- function(path, payload) {
   writeLines(toJSON(payload, auto_unbox = TRUE, pretty = TRUE), con = path)
 }
 
+write_csv_auto <- function(dt, path) {
+  if (!grepl("\\.gz$", path, ignore.case = TRUE)) {
+    fwrite(dt, path)
+    return(invisible(path))
+  }
+
+  tmp_path <- tempfile(fileext = ".csv")
+  on.exit(unlink(tmp_path), add = TRUE)
+  fwrite(dt, tmp_path)
+
+  in_con <- file(tmp_path, open = "rb")
+  out_con <- gzfile(path, open = "wb")
+  on.exit(close(in_con), add = TRUE)
+  on.exit(close(out_con), add = TRUE)
+
+  repeat {
+    chunk <- readBin(in_con, what = raw(), n = 1024 * 1024)
+    if (length(chunk) == 0) {
+      break
+    }
+    writeBin(chunk, out_con)
+  }
+
+  invisible(path)
+}
+
 parse_harmony_vars <- function(value) {
   vars <- trimws(strsplit(value, ",", fixed = TRUE)[[1]])
   vars[nzchar(vars)]
+}
+
+parse_int_list <- function(value) {
+  if (is.null(value) || !nzchar(value)) {
+    return(integer())
+  }
+  pieces <- trimws(strsplit(value, ",", fixed = TRUE)[[1]])
+  pieces <- pieces[nzchar(pieces)]
+  as.integer(pieces)
+}
+
+format_dims <- function(values) {
+  if (length(values) == 0) {
+    return("none")
+  }
+  paste(values, collapse = ",")
 }
 
 peaks_to_granges <- function(peaks) {
@@ -242,7 +284,15 @@ mixing_metric_safe <- function(object, grouping_var, reduction_name, dims_use, k
   compute_neighbor_batch_diversity(embedding, object[[grouping_var]][, 1], k = k)
 }
 
-save_correlation_outputs <- function(object, output_dir, dims_use, qc_vars) {
+select_mixing_indices <- function(total_cells, max_cells) {
+  if (is.null(max_cells) || max_cells <= 0 || total_cells <= max_cells) {
+    return(seq_len(total_cells))
+  }
+  set.seed(1)
+  sort(sample.int(total_cells, size = max_cells, replace = FALSE))
+}
+
+compute_qc_correlation_matrix <- function(object, dims_use, qc_vars) {
   lsi_embeddings <- Embeddings(object[["lsi"]])[, dims_use, drop = FALSE]
   meta <- object@meta.data[, qc_vars, drop = FALSE]
   cor_mat <- matrix(NA_real_, nrow = ncol(lsi_embeddings), ncol = ncol(meta))
@@ -257,6 +307,10 @@ save_correlation_outputs <- function(object, output_dir, dims_use, qc_vars) {
       cor_mat[i, j] <- suppressWarnings(cor(lsi_embeddings[, i], values, use = "pairwise.complete.obs"))
     }
   }
+  cor_mat
+}
+
+save_correlation_outputs <- function(cor_mat, output_dir) {
   write.csv(as.data.frame(cor_mat), file.path(output_dir, "lsi_qc_correlations.csv"), quote = FALSE)
   png(file.path(output_dir, "lsi_qc_correlation_heatmap.png"), width = 1800, height = 1400, res = 180)
   pheatmap::pheatmap(
@@ -268,6 +322,39 @@ save_correlation_outputs <- function(object, output_dir, dims_use, qc_vars) {
     main = "LSI dimension correlation with QC metrics"
   )
   dev.off()
+}
+
+resolve_dims_use <- function(object, dims_use, qc_vars, output_dir, drop_dims = integer(), auto_drop = FALSE, qc_threshold = 0.4) {
+  cor_mat <- compute_qc_correlation_matrix(object, dims_use, qc_vars)
+  max_abs <- apply(abs(cor_mat), 1, function(values) {
+    if (all(is.na(values))) {
+      return(0)
+    }
+    max(values, na.rm = TRUE)
+  })
+  auto_drop_dims <- integer()
+  if (isTRUE(auto_drop)) {
+    auto_drop_dims <- dims_use[max_abs >= qc_threshold]
+  }
+  manual_drop_dims <- intersect(dims_use, drop_dims)
+  selected_dims <- setdiff(dims_use, unique(c(manual_drop_dims, auto_drop_dims)))
+  if (length(selected_dims) < 2) {
+    stop("Need at least two LSI dimensions after dropping QC-loaded dims")
+  }
+  audit <- data.frame(
+    lsi_dim = dims_use,
+    max_abs_qc_correlation = as.numeric(max_abs),
+    dropped_manually = dims_use %in% manual_drop_dims,
+    dropped_automatically = dims_use %in% auto_drop_dims,
+    used_for_integration = dims_use %in% selected_dims
+  )
+  write.csv(audit, file.path(output_dir, "lsi_dim_selection.csv"), row.names = FALSE, quote = FALSE)
+  list(
+    cor_mat = cor_mat,
+    selected_dims = selected_dims,
+    manually_dropped = manual_drop_dims,
+    automatically_dropped = auto_drop_dims
+  )
 }
 
 save_cluster_heatmap <- function(object, output_dir, sample_var) {
@@ -323,7 +410,7 @@ save_metadata_outputs <- function(object, output_dir, lsi_dims, harmony_dims) {
   meta$UMAP_LSI_2 <- umap_lsi[, 2]
   meta$UMAP_Harmony_1 <- umap_harmony[, 1]
   meta$UMAP_Harmony_2 <- umap_harmony[, 2]
-  fwrite(meta, file.path(output_dir, "integrated_metadata.csv.gz"))
+  write_csv_auto(meta, file.path(output_dir, "integrated_metadata.csv.gz"))
 }
 
 write_report <- function(output_dir, summary_rows, mixing_rows, harmony_vars, dims_use) {
@@ -331,7 +418,7 @@ write_report <- function(output_dir, summary_rows, mixing_rows, harmony_vars, di
     "# Batch integration report",
     "",
     paste0("- Harmony variables: `", paste(harmony_vars, collapse = ", "), "`"),
-    paste0("- Dimensions used: `", paste(range(dims_use), collapse = ":"), "`"),
+    paste0("- Dimensions used: `", format_dims(dims_use), "`"),
     "",
     "## Summary",
     ""
@@ -356,8 +443,13 @@ option_list <- list(
   make_option("--npcs", type = "integer", default = 30L, dest = "npcs"),
   make_option("--dims-start", type = "integer", default = 2L, dest = "dims_start"),
   make_option("--dims-end", type = "integer", default = 30L, dest = "dims_end"),
+  make_option("--drop-lsi-dims", type = "character", default = "", dest = "drop_lsi_dims"),
+  make_option("--auto-drop-qc-correlated-dims", action = "store_true", default = FALSE, dest = "auto_drop_qc_correlated_dims"),
+  make_option("--qc-correlation-threshold", type = "double", default = 0.4, dest = "qc_correlation_threshold"),
   make_option("--neighbors-k", type = "integer", default = 30L, dest = "neighbors_k"),
+  make_option("--mixing-max-cells", type = "integer", default = 0L, dest = "mixing_max_cells"),
   make_option("--resolution", type = "double", default = 0.6, dest = "resolution"),
+  make_option("--skip-mixing-metrics", action = "store_true", default = FALSE, dest = "skip_mixing_metrics"),
   make_option("--save-rds", action = "store_true", default = FALSE, dest = "save_rds")
 )
 
@@ -371,6 +463,7 @@ output_dir <- normalizePath(opt$output_dir, winslash = "/", mustWork = FALSE)
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 harmony_vars <- parse_harmony_vars(opt$harmony_vars)
+drop_lsi_dims <- parse_int_list(opt$drop_lsi_dims)
 if (length(harmony_vars) == 0) {
   stop("At least one harmony variable is required")
 }
@@ -393,6 +486,26 @@ if (length(missing_harmony_vars) > 0) {
 cat("[3/8] Running TF-IDF and LSI...\n")
 obj <- prepare_object(obj, opt$npcs)
 
+cat("[3.5/8] Auditing LSI dimensions against QC metrics...\n")
+  dim_resolution <- resolve_dims_use(
+    obj,
+    dims_use,
+    qc_vars,
+    output_dir,
+    drop_dims = drop_lsi_dims,
+    auto_drop = opt$auto_drop_qc_correlated_dims,
+    qc_threshold = opt$qc_correlation_threshold
+  )
+save_correlation_outputs(dim_resolution$cor_mat, output_dir)
+dims_use <- dim_resolution$selected_dims
+cat("LSI dims kept for downstream integration:", format_dims(dims_use), "\n")
+if (length(dim_resolution$manually_dropped) > 0) {
+  cat("Manually dropped dims:", format_dims(dim_resolution$manually_dropped), "\n")
+}
+if (length(dim_resolution$automatically_dropped) > 0) {
+  cat("Auto-dropped QC-correlated dims:", format_dims(dim_resolution$automatically_dropped), "\n")
+}
+
 cat("[4/8] Building pre-Harmony UMAP...\n")
 obj <- RunUMAP(obj, reduction = "lsi", dims = dims_use, reduction.name = "umap_lsi", reduction.key = "UMAPLSI_", verbose = FALSE)
 
@@ -406,18 +519,36 @@ obj <- FindClusters(obj, resolution = opt$resolution, verbose = FALSE)
 obj <- RunUMAP(obj, reduction = "harmony", dims = harmony_dims, reduction.name = "umap_harmony", reduction.key = "UMAPHARM_", verbose = FALSE)
 
 cat("[7/8] Computing integration quality metrics...\n")
-mixing_gse <- mixing_metric_safe(obj, "source_gse", "harmony", harmony_dims, opt$neighbors_k)
-mixing_gsm <- mixing_metric_safe(obj, "source_gsm", "harmony", harmony_dims, opt$neighbors_k)
-obj$mixing_source_gse <- mixing_gse
-obj$mixing_source_gsm <- mixing_gsm
-
-mixing_summary <- data.frame(
-  metric = c("mixing_source_gse", "mixing_source_gsm"),
-  mean = c(mean(mixing_gse, na.rm = TRUE), mean(mixing_gsm, na.rm = TRUE)),
-  median = c(median(mixing_gse, na.rm = TRUE), median(mixing_gsm, na.rm = TRUE)),
-  q05 = c(quantile(mixing_gse, 0.05, na.rm = TRUE), quantile(mixing_gsm, 0.05, na.rm = TRUE)),
-  q95 = c(quantile(mixing_gse, 0.95, na.rm = TRUE), quantile(mixing_gsm, 0.95, na.rm = TRUE))
-)
+if (isTRUE(opt$skip_mixing_metrics)) {
+  mixing_gse <- rep(NA_real_, ncol(obj))
+  mixing_gsm <- rep(NA_real_, ncol(obj))
+  obj$mixing_source_gse <- mixing_gse
+  obj$mixing_source_gsm <- mixing_gsm
+  mixing_summary <- data.frame(
+    metric = c("mixing_source_gse", "mixing_source_gsm"),
+    mean = c(NA_real_, NA_real_),
+    median = c(NA_real_, NA_real_),
+    q05 = c(NA_real_, NA_real_),
+    q95 = c(NA_real_, NA_real_)
+  )
+} else {
+  mixing_indices <- select_mixing_indices(ncol(obj), opt$mixing_max_cells)
+  mixing_gse_subset <- mixing_metric_safe(obj[, mixing_indices], "source_gse", "harmony", harmony_dims, opt$neighbors_k)
+  mixing_gsm_subset <- mixing_metric_safe(obj[, mixing_indices], "source_gsm", "harmony", harmony_dims, opt$neighbors_k)
+  mixing_gse <- rep(NA_real_, ncol(obj))
+  mixing_gsm <- rep(NA_real_, ncol(obj))
+  mixing_gse[mixing_indices] <- mixing_gse_subset
+  mixing_gsm[mixing_indices] <- mixing_gsm_subset
+  obj$mixing_source_gse <- mixing_gse
+  obj$mixing_source_gsm <- mixing_gsm
+  mixing_summary <- data.frame(
+    metric = c("mixing_source_gse", "mixing_source_gsm"),
+    mean = c(mean(mixing_gse, na.rm = TRUE), mean(mixing_gsm, na.rm = TRUE)),
+    median = c(median(mixing_gse, na.rm = TRUE), median(mixing_gsm, na.rm = TRUE)),
+    q05 = c(quantile(mixing_gse, 0.05, na.rm = TRUE), quantile(mixing_gsm, 0.05, na.rm = TRUE)),
+    q95 = c(quantile(mixing_gse, 0.95, na.rm = TRUE), quantile(mixing_gsm, 0.95, na.rm = TRUE))
+  )
+}
 write.csv(mixing_summary, file.path(output_dir, "batch_mixing_metrics.csv"), row.names = FALSE)
 
 cat("[8/8] Saving outputs...\n")
@@ -459,7 +590,6 @@ save_plot(
   height = 10
 )
 
-save_correlation_outputs(obj, output_dir, dims_use, qc_vars)
 save_cluster_heatmap(obj, output_dir, "source_gsm")
 save_marker_summary(obj, output_dir, top_n = 10)
 save_metadata_outputs(obj, output_dir, dims_use, harmony_dims)
@@ -472,6 +602,9 @@ summary_payload <- list(
   selected_features = nrow(obj),
   harmony_vars = harmony_vars,
   dims_use = dims_use,
+  manually_dropped_lsi_dims = dim_resolution$manually_dropped,
+  automatically_dropped_lsi_dims = dim_resolution$automatically_dropped,
+  mixing_max_cells = opt$mixing_max_cells,
   neighbors_k = opt$neighbors_k,
   resolution = opt$resolution,
   clusters = length(unique(obj$seurat_clusters)),
@@ -483,7 +616,11 @@ write_json(file.path(output_dir, "integration_summary.json"), summary_payload)
 summary_rows <- c(
   paste0("Cells integrated: ", format(ncol(obj), big.mark = ",")),
   paste0("Peaks retained for integration: ", format(nrow(obj), big.mark = ",")),
-  paste0("Clusters: ", length(unique(obj$seurat_clusters)))
+  paste0("Clusters: ", length(unique(obj$seurat_clusters))),
+  paste0("LSI dims used downstream: ", format_dims(dims_use)),
+  paste0("LSI dims dropped manually: ", format_dims(dim_resolution$manually_dropped)),
+  paste0("LSI dims dropped by QC correlation: ", format_dims(dim_resolution$automatically_dropped)),
+  paste0("Cells used for mixing metrics: ", if (opt$mixing_max_cells > 0) min(opt$mixing_max_cells, ncol(obj)) else ncol(obj))
 )
 mixing_rows <- c(
   paste0("source_gse mean mixing score: ", sprintf("%.4f", mean(mixing_gse, na.rm = TRUE))),
