@@ -1,19 +1,5 @@
 #!/usr/bin/env Rscript
 
-suppressPackageStartupMessages({
-  library(optparse)
-  library(Signac)
-  library(Seurat)
-  library(GenomeInfoDb)
-  library(EnsDb.Hsapiens.v86)
-  library(scDblFinder)
-  library(SingleCellExperiment)
-  library(Matrix)
-  library(rtracklayer)
-  library(ggplot2)
-  library(patchwork)
-})
-
 get_script_path <- function() {
   args <- commandArgs(trailingOnly = FALSE)
   file_arg <- "--file="
@@ -29,6 +15,29 @@ project_root <- normalizePath(
   winslash = "/",
   mustWork = TRUE
 )
+
+project_r_lib <- if (.Platform$OS.type == "windows") {
+  file.path(project_root, ".r-win-library")
+} else {
+  file.path(project_root, ".r-linux-library")
+}
+if (dir.exists(project_r_lib)) {
+  .libPaths(c(project_r_lib, .libPaths()))
+}
+
+suppressPackageStartupMessages({
+  library(optparse)
+  library(Signac)
+  library(Seurat)
+  library(GenomeInfoDb)
+  library(EnsDb.Hsapiens.v86)
+  library(scDblFinder)
+  library(SingleCellExperiment)
+  library(Matrix)
+  library(rtracklayer)
+  library(ggplot2)
+  library(patchwork)
+})
 
 find_single_file <- function(raw_dir, gsm, token, required = TRUE, exts = c("tsv")) {
   ext_pattern <- paste(exts, collapse = "|")
@@ -338,7 +347,421 @@ write_lines_gz <- function(lines, path) {
   writeLines(lines, con = con, sep = "\n")
 }
 
+make_peak_ids <- function(gr) {
+  paste0(as.character(seqnames(gr)), ":", start(gr) - 1L, "-", end(gr))
+}
+
+mix_color <- function(color, target = "#FFFFFF", amount = 0.5) {
+  amount <- min(max(amount, 0), 1)
+  source_rgb <- grDevices::col2rgb(color) / 255
+  target_rgb <- grDevices::col2rgb(target) / 255
+  blended <- source_rgb * (1 - amount) + target_rgb * amount
+  grDevices::rgb(blended[1], blended[2], blended[3])
+}
+
+make_shade_palette <- function(base_color, labels) {
+  labels <- unique(labels)
+  n <- length(labels)
+  if (n == 0) {
+    return(setNames(character(), character()))
+  }
+  if (n == 1) {
+    return(stats::setNames(base_color, labels))
+  }
+  shades <- grDevices::colorRampPalette(
+    c(
+      mix_color(base_color, "#FFFFFF", 0.55),
+      base_color,
+      mix_color(base_color, "#000000", 0.18)
+    )
+  )(n)
+  stats::setNames(shades, labels)
+}
+
+load_cima_hierarchy <- function(path) {
+  hierarchy <- read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
+  required_cols <- c("cell_type_l1", "cell_type_l2", "cell_type_l3", "cell_type_l4")
+  missing_cols <- setdiff(required_cols, colnames(hierarchy))
+  if (length(missing_cols) > 0) {
+    stop("CIMA hierarchy file is missing columns: ", paste(missing_cols, collapse = ", "))
+  }
+  hierarchy <- unique(hierarchy[, required_cols, drop = FALSE])
+  if (anyDuplicated(hierarchy$cell_type_l4)) {
+    stop("CIMA hierarchy has non-unique cell_type_l4 labels")
+  }
+  hierarchy[order(hierarchy$cell_type_l1, hierarchy$cell_type_l2, hierarchy$cell_type_l3, hierarchy$cell_type_l4), , drop = FALSE]
+}
+
+load_cima_reference_feature_model <- function(path) {
+  model_df <- read.delim(gzfile(path), sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
+  required_cols <- c("feature_index", "feature_id", "idf")
+  missing_cols <- setdiff(required_cols, colnames(model_df))
+  if (length(missing_cols) > 0) {
+    stop("CIMA reference feature model is missing columns: ", paste(missing_cols, collapse = ", "))
+  }
+  dim_cols <- grep("^dim_", colnames(model_df), value = TRUE)
+  if (length(dim_cols) < 2) {
+    stop("CIMA reference feature model must include at least two LSI dimensions")
+  }
+
+  list(
+    feature_index = as.integer(model_df$feature_index),
+    feature_id = as.character(model_df$feature_id),
+    idf = as.numeric(model_df$idf),
+    loadings = as.matrix(model_df[, dim_cols, drop = FALSE]),
+    dims = dim_cols
+  )
+}
+
+load_cima_reference_centroids <- function(path, id_col) {
+  centroid_df <- read.delim(path, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
+  if (!id_col %in% colnames(centroid_df)) {
+    stop("CIMA centroid table missing id column: ", id_col)
+  }
+  dim_cols <- grep("^dim_", colnames(centroid_df), value = TRUE)
+  if (length(dim_cols) < 2) {
+    stop("CIMA centroid table must include at least two LSI dimensions: ", path)
+  }
+
+  list(
+    labels = centroid_df[[id_col]],
+    embedding = as.matrix(centroid_df[, dim_cols, drop = FALSE])
+  )
+}
+
+build_cima_palettes <- function(hierarchy) {
+  base_palette_defaults <- c(
+    B = "#2C7BB6",
+    CD4_T = "#D7191C",
+    "CD8_T&unconvensional_T" = "#FDAE61",
+    Myeloid = "#1A9641",
+    ILC = "#762A83"
+  )
+  fallback_colors <- c("#5E4FA2", "#3288BD", "#66C2A5", "#ABDDA4", "#FEE08B", "#F46D43", "#A50026")
+
+  l1_labels <- unique(hierarchy$cell_type_l1)
+  missing_l1 <- setdiff(l1_labels, names(base_palette_defaults))
+  if (length(missing_l1) > 0) {
+    extra_colors <- fallback_colors[seq_len(length(missing_l1))]
+    names(extra_colors) <- missing_l1
+    base_palette_defaults <- c(base_palette_defaults, extra_colors)
+  }
+  l1_palette <- base_palette_defaults[l1_labels]
+
+  build_level_palette <- function(level_col) {
+    palette <- c()
+    for (l1 in l1_labels) {
+      labels <- sort(unique(hierarchy[hierarchy$cell_type_l1 == l1, level_col]))
+      palette <- c(palette, make_shade_palette(l1_palette[[l1]], labels))
+    }
+    palette
+  }
+
+  list(
+    cima_cell_type_l1 = l1_palette,
+    cima_cell_type_l2 = build_level_palette("cell_type_l2"),
+    cima_cell_type_l3 = build_level_palette("cell_type_l3"),
+    cima_cell_type_l4 = build_level_palette("cell_type_l4")
+  )
+}
+
+normalize_embedding_rows <- function(mat) {
+  if (nrow(mat) == 0) {
+    return(mat)
+  }
+  norms <- sqrt(rowSums(mat ^ 2))
+  norms[norms == 0] <- 1
+  sweep(mat, 1, norms, "/")
+}
+
+predict_cima_centroids <- function(query_embeddings, centroids, allowed_labels = NULL) {
+  labels <- centroids$labels
+  centroid_embeddings <- centroids$embedding
+  dims_use <- seq.int(2, min(ncol(query_embeddings), ncol(centroid_embeddings)))
+  if (length(dims_use) < 2) {
+    stop("CIMA centroid prediction requires at least two embedding dimensions")
+  }
+
+  query_norm <- normalize_embedding_rows(query_embeddings[, dims_use, drop = FALSE])
+  centroid_norm <- normalize_embedding_rows(centroid_embeddings[, dims_use, drop = FALSE])
+
+  pick_from_similarity <- function(similarity, candidate_labels) {
+    order_idx <- order(similarity, decreasing = TRUE)
+    top_idx <- order_idx[1]
+    top_score <- similarity[top_idx]
+    margin <- if (length(order_idx) > 1) {
+      top_score - similarity[order_idx[2]]
+    } else {
+      NA_real_
+    }
+    list(label = candidate_labels[top_idx], score = top_score, margin = margin)
+  }
+
+  if (is.null(allowed_labels)) {
+    similarity <- query_norm %*% t(centroid_norm)
+    top_index <- max.col(similarity, ties.method = "first")
+    top_score <- similarity[cbind(seq_len(nrow(similarity)), top_index)]
+    score_margin <- apply(similarity, 1, function(values) {
+      ranked <- sort(values, decreasing = TRUE)
+      if (length(ranked) < 2) {
+        return(NA_real_)
+      }
+      ranked[1] - ranked[2]
+    })
+    return(list(
+      label = labels[top_index],
+      score = as.numeric(top_score),
+      margin = as.numeric(score_margin)
+    ))
+  }
+
+  label_out <- character(nrow(query_norm))
+  score_out <- numeric(nrow(query_norm))
+  margin_out <- numeric(nrow(query_norm))
+  margin_out[] <- NA_real_
+
+  label_pos <- stats::setNames(seq_along(labels), labels)
+  full_similarity <- query_norm %*% t(centroid_norm)
+  for (i in seq_len(nrow(query_norm))) {
+    candidates <- allowed_labels[[i]]
+    if (length(candidates) == 0) {
+      candidates <- labels
+    }
+    pos <- unname(label_pos[candidates])
+    pos <- pos[!is.na(pos)]
+    if (length(pos) == 0) {
+      pos <- seq_along(labels)
+    }
+    picked <- pick_from_similarity(full_similarity[i, pos], labels[pos])
+    label_out[i] <- picked$label
+    score_out[i] <- picked$score
+    margin_out[i] <- picked$margin
+  }
+
+  list(label = label_out, score = score_out, margin = margin_out)
+}
+
+annotate_cima_reference_model <- function(counts, hierarchy, feature_model, centroids_by_level) {
+  if (ncol(counts) == 0) {
+    return(list(
+      annotations = data.frame(
+        cell_barcode = character(),
+        cima_cell_type_l1 = character(),
+        cima_cell_type_l2 = character(),
+        cima_cell_type_l3 = character(),
+        cima_cell_type_l4 = character(),
+        cima_l4_score = numeric(),
+        cima_l4_score_margin = numeric(),
+        stringsAsFactors = FALSE
+      ),
+      embeddings = matrix(numeric(), nrow = 0, ncol = 0)
+    ))
+  }
+
+  selected_idx <- feature_model$feature_index
+  if (max(selected_idx) > nrow(counts)) {
+    stop("CIMA reference feature model expects more peaks than provided in query matrix")
+  }
+  expected_feature_ids <- feature_model$feature_id
+  observed_feature_ids <- rownames(counts)[selected_idx]
+  if (!identical(observed_feature_ids, expected_feature_ids)) {
+    mismatch_idx <- which(observed_feature_ids != expected_feature_ids)[1]
+    stop(
+      "CIMA reference feature identity mismatch at selected feature ",
+      mismatch_idx,
+      ": observed=",
+      observed_feature_ids[[mismatch_idx]],
+      " expected=",
+      expected_feature_ids[[mismatch_idx]]
+    )
+  }
+  selected_counts <- counts[selected_idx, , drop = FALSE]
+
+  binary_counts <- selected_counts
+  if (length(binary_counts@x) > 0) {
+    binary_counts@x[] <- 1
+  }
+
+  cell_peak_totals <- Matrix::colSums(binary_counts)
+  cell_peak_totals[cell_peak_totals == 0] <- 1
+  tf_counts <- binary_counts
+  tf_counts@x <- tf_counts@x / rep.int(cell_peak_totals, diff(tf_counts@p))
+  tfidf_counts <- Diagonal(x = feature_model$idf) %*% tf_counts
+  query_embeddings <- as.matrix(Matrix::crossprod(tfidf_counts, feature_model$loadings))
+  rownames(query_embeddings) <- colnames(counts)
+   colnames(query_embeddings) <- feature_model$dims
+
+  l2_by_l1 <- lapply(split(hierarchy$cell_type_l2, hierarchy$cell_type_l1), unique)
+  l3_by_l2 <- lapply(
+    split(hierarchy$cell_type_l3, paste(hierarchy$cell_type_l1, hierarchy$cell_type_l2, sep = "||")),
+    unique
+  )
+  l4_by_l3 <- lapply(
+    split(hierarchy$cell_type_l4, paste(hierarchy$cell_type_l1, hierarchy$cell_type_l2, hierarchy$cell_type_l3, sep = "||")),
+    unique
+  )
+
+  pred_l1 <- predict_cima_centroids(query_embeddings, centroids_by_level$l1)
+  allowed_l2 <- lapply(pred_l1$label, function(label) l2_by_l1[[label]])
+  pred_l2 <- predict_cima_centroids(query_embeddings, centroids_by_level$l2, allowed_labels = allowed_l2)
+
+  allowed_l3 <- lapply(seq_along(pred_l1$label), function(i) {
+    key <- paste(pred_l1$label[[i]], pred_l2$label[[i]], sep = "||")
+    l3_by_l2[[key]]
+  })
+  pred_l3 <- predict_cima_centroids(query_embeddings, centroids_by_level$l3, allowed_labels = allowed_l3)
+
+  allowed_l4 <- lapply(seq_along(pred_l1$label), function(i) {
+    key <- paste(pred_l1$label[[i]], pred_l2$label[[i]], pred_l3$label[[i]], sep = "||")
+    l4_by_l3[[key]]
+  })
+  pred_l4 <- predict_cima_centroids(query_embeddings, centroids_by_level$l4, allowed_labels = allowed_l4)
+
+  list(
+    annotations = data.frame(
+      cell_barcode = colnames(binary_counts),
+      cima_cell_type_l1 = pred_l1$label,
+      cima_cell_type_l2 = pred_l2$label,
+      cima_cell_type_l3 = pred_l3$label,
+      cima_cell_type_l4 = pred_l4$label,
+      cima_l4_score = as.numeric(pred_l4$score),
+      cima_l4_score_margin = as.numeric(pred_l4$margin),
+      stringsAsFactors = FALSE,
+      row.names = colnames(binary_counts)
+    ),
+    embeddings = query_embeddings
+  )
+}
+
+run_cima_reference_umap <- function(atac_obj, query_embeddings) {
+  available_dims <- ncol(query_embeddings)
+  dims_use <- seq.int(2, min(30, available_dims))
+  if (length(dims_use) < 2) {
+    stop("Not enough reference-projected dimensions available for CIMA UMAP")
+  }
+
+  reduction_embeddings <- query_embeddings
+  colnames(reduction_embeddings) <- paste0("CIMAREFLSI_", seq_len(ncol(reduction_embeddings)))
+  atac_obj[["cima_ref_lsi"]] <- CreateDimReducObject(
+    embeddings = reduction_embeddings,
+    key = "CIMAREFLSI_",
+    assay = DefaultAssay(atac_obj)
+  )
+
+  atac_obj <- RunUMAP(
+    atac_obj,
+    reduction = "cima_ref_lsi",
+    dims = dims_use,
+    reduction.name = "cima_ref_umap",
+    reduction.key = "CIMAUMAP_",
+    verbose = FALSE
+  )
+
+  list(object = atac_obj, dims = dims_use)
+}
+
+run_single_sample_umap <- function(atac_obj) {
+  DefaultAssay(atac_obj) <- "ATAC"
+  atac_obj <- RunTFIDF(atac_obj)
+  atac_obj <- FindTopFeatures(atac_obj, min.cutoff = "q0")
+  atac_obj <- RunSVD(atac_obj)
+
+  lsi_embeddings <- Embeddings(atac_obj[["lsi"]])
+  available_dims <- ncol(lsi_embeddings)
+  dims_use <- seq.int(2, min(30, available_dims))
+  if (length(dims_use) < 2) {
+    stop("Not enough LSI dimensions available for per-sample UMAP")
+  }
+
+  atac_obj <- RunUMAP(
+    atac_obj,
+    reduction = "lsi",
+    dims = dims_use,
+    reduction.name = "umap",
+    reduction.key = "UMAP_",
+    verbose = FALSE
+  )
+
+  list(object = atac_obj, dims = dims_use)
+}
+
+save_cima_umap_plot <- function(plot_df, label_col, palette, out_path, title_text) {
+  clean_df <- plot_df[!is.na(plot_df[[label_col]]) & nzchar(plot_df[[label_col]]), , drop = FALSE]
+  plot_obj <- if (nrow(clean_df) == 0) {
+    make_placeholder_plot(title_text, paste0("No values available for ", label_col))
+  } else {
+    clean_df[[label_col]] <- factor(clean_df[[label_col]], levels = names(palette))
+    ggplot(clean_df, aes(x = UMAP_1, y = UMAP_2, color = .data[[label_col]])) +
+      geom_point(size = 0.25, alpha = 0.85) +
+      scale_color_manual(values = palette, drop = FALSE) +
+      labs(title = title_text, x = "UMAP_1", y = "UMAP_2", color = NULL) +
+      theme_bw(base_size = 11) +
+      theme(
+        plot.title = element_text(face = "bold"),
+        legend.key.height = grid::unit(0.35, "cm"),
+        legend.text = element_text(size = 8)
+      )
+  }
+
+  ggsave(
+    filename = out_path,
+    plot = plot_obj,
+    width = 10,
+    height = 8,
+    units = "in",
+    dpi = 150,
+    limitsize = FALSE
+  )
+}
+
 ensure_tabix_index <- function(fragment_file) {
+  is_bgzf_file <- function(path) {
+    con <- file(path, open = "rb")
+    on.exit(close(con), add = TRUE)
+    header <- readBin(con, what = "raw", n = 18)
+    if (length(header) < 18) {
+      return(FALSE)
+    }
+    gzip_magic <- identical(as.integer(header[1:2]), c(31L, 139L))
+    has_fextra <- bitwAnd(as.integer(header[4]), 4L) != 0L
+    has_bgzf_tag <- identical(as.integer(header[13:16]), c(66L, 67L, 2L, 0L))
+    gzip_magic && has_fextra && has_bgzf_tag
+  }
+
+  ensure_bgzf <- function(path) {
+    if (is_bgzf_file(path)) {
+      return(path)
+    }
+
+    if (!requireNamespace("Rsamtools", quietly = TRUE)) {
+      stop(
+        "Fragment file is not bgzip-compressed and Rsamtools is unavailable for conversion: ",
+        path
+      )
+    }
+
+    tmp_bgzf <- paste0(path, ".bgzip_tmp")
+    if (file.exists(tmp_bgzf)) {
+      file.remove(tmp_bgzf)
+    }
+
+    cat("Fragment file is regular gzip, converting to bgzip in place:", basename(path), "\n")
+    Rsamtools::bgzip(path, dest = tmp_bgzf, overwrite = TRUE)
+
+    if (!file.exists(tmp_bgzf)) {
+      stop("bgzip conversion did not produce: ", tmp_bgzf)
+    }
+
+    if (file.exists(path) && !file.remove(path)) {
+      stop("Failed to remove original gzip fragment file before replacing with bgzip: ", path)
+    }
+    if (!file.rename(tmp_bgzf, path)) {
+      stop("Failed to replace fragment file with bgzip version: ", path)
+    }
+    path
+  }
+
+  fragment_file <- ensure_bgzf(fragment_file)
   tbi_file <- paste0(fragment_file, ".tbi")
   if (file.exists(tbi_file)) {
     return(tbi_file)
@@ -382,7 +805,9 @@ ensure_tabix_index <- function(fragment_file) {
 option_list <- list(
   make_option(c("--gse"), type = "character", help = "GSE accession"),
   make_option(c("--gsm"), type = "character", help = "GSM accession"),
-  make_option(c("--nmads"), type = "numeric", default = 4, help = "MAD multiplier")
+  make_option(c("--nmads"), type = "numeric", default = 4, help = "MAD multiplier"),
+  make_option(c("--output-profile"), type = "character", default = "full", help = "Output profile: full or matrix-lite"),
+  make_option(c("--output-root"), type = "character", default = file.path(project_root, "output"), help = "Output root directory")
 )
 
 opt_parser <- OptionParser(option_list = option_list)
@@ -393,9 +818,23 @@ if (is.null(opt$gse) || is.null(opt$gsm)) {
   stop("Both --gse and --gsm are required")
 }
 
+valid_output_profiles <- c("full", "matrix-lite", "validation-lite")
+if (!opt$`output-profile` %in% valid_output_profiles) {
+  stop("Unsupported --output-profile: ", opt$`output-profile`, ". Choose one of: ", paste(valid_output_profiles, collapse = ", "))
+}
+is_lite_output <- opt$`output-profile` %in% c("matrix-lite", "validation-lite")
+
 raw_dir <- file.path(project_root, "data", "raw", opt$gse)
 peak_file <- file.path(project_root, "data", "reference", "peak.bed")
-output_dir <- file.path(project_root, "output", opt$gse, opt$gsm)
+cima_dir <- file.path(project_root, "data", "reference", "cima")
+cima_reference_file <- file.path(cima_dir, "CIMA_ATAC_3762242cells_338036peaks_compressed.h5ad")
+cima_hierarchy_file <- file.path(cima_dir, "cima_atac_celltype_hierarchy.csv")
+cima_feature_model_file <- file.path(cima_dir, "cima_atac_reference_lsi_features.tsv.gz")
+cima_l1_centroid_file <- file.path(cima_dir, "cima_atac_reference_l1_centroids.tsv")
+cima_l2_centroid_file <- file.path(cima_dir, "cima_atac_reference_l2_centroids.tsv")
+cima_l3_centroid_file <- file.path(cima_dir, "cima_atac_reference_l3_centroids.tsv")
+cima_l4_centroid_file <- file.path(cima_dir, "cima_atac_reference_l4_centroids.tsv")
+output_dir <- file.path(opt$`output-root`, opt$gse, opt$gsm)
 matrix_dir <- file.path(output_dir, "matrix")
 
 if (!dir.exists(raw_dir)) {
@@ -404,9 +843,35 @@ if (!dir.exists(raw_dir)) {
 if (!file.exists(peak_file)) {
   stop("Peak file not found: ", peak_file)
 }
+if (!file.exists(cima_hierarchy_file)) {
+  stop("CIMA ATAC hierarchy file not found: ", cima_hierarchy_file)
+}
+required_cima_model_files <- c(
+  cima_feature_model_file,
+  cima_l1_centroid_file,
+  cima_l2_centroid_file,
+  cima_l3_centroid_file,
+  cima_l4_centroid_file
+)
+missing_cima_model_files <- required_cima_model_files[!file.exists(required_cima_model_files)]
+if (length(missing_cima_model_files) > 0) {
+  stop("Missing CIMA reference model files: ", paste(missing_cima_model_files, collapse = ", "))
+}
 
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(matrix_dir, recursive = TRUE, showWarnings = FALSE)
+
+write_csv_gz <- function(dataframe, path) {
+  con <- gzfile(path, open = "wt")
+  on.exit(close(con), add = TRUE)
+  utils::write.csv(dataframe, con, row.names = FALSE)
+}
+
+write_lines_plain <- function(lines, out_path) {
+  con <- file(out_path, open = "wt")
+  on.exit(close(con), add = TRUE)
+  writeLines(lines, con = con, useBytes = TRUE)
+}
 
 make_barcode_rank_plot <- function(fragment_stats, knee_threshold, inflection_threshold, floor_auto, candidate_threshold, candidate_rank_cap) {
   plot_df <- fragment_stats
@@ -578,6 +1043,24 @@ peaks_gr <- keepSeqlevels(peaks_gr, common_seq, pruning.mode = "coarse")
 annotations <- keepSeqlevels(annotations, common_seq, pruning.mode = "coarse")
 blacklist_hg38_unified <- keepSeqlevels(blacklist_hg38_unified, common_seq, pruning.mode = "coarse")
 seqinfo(peaks_gr) <- seqinfo(annotations)[common_seq]
+project_peak_ids <- make_peak_ids(peaks_gr)
+
+cima_hierarchy <- load_cima_hierarchy(cima_hierarchy_file)
+cima_feature_model <- load_cima_reference_feature_model(cima_feature_model_file)
+cima_centroids <- list(
+  l1 = load_cima_reference_centroids(cima_l1_centroid_file, "cell_type_l1"),
+  l2 = load_cima_reference_centroids(cima_l2_centroid_file, "cell_type_l2"),
+  l3 = load_cima_reference_centroids(cima_l3_centroid_file, "cell_type_l3"),
+  l4 = load_cima_reference_centroids(cima_l4_centroid_file, "cell_type_l4")
+)
+if (max(cima_feature_model$feature_index) > length(project_peak_ids)) {
+  stop(
+    "CIMA reference feature model exceeds loaded project peak space: max index=",
+    max(cima_feature_model$feature_index),
+    " peaks=",
+    length(project_peak_ids)
+  )
+}
 
 cat("Peaks:", length(peaks_gr), "\n")
 cat("Common chromosomes:", length(common_seq), "\n\n")
@@ -594,6 +1077,15 @@ counts <- FeatureMatrix(
   features = peaks_gr,
   cells = barcodes
 )
+if (nrow(counts) != length(project_peak_ids)) {
+  stop(
+    "FeatureMatrix row count does not match project peak reference order: matrix rows=",
+    nrow(counts),
+    " expected peaks=",
+    length(project_peak_ids)
+  )
+}
+rownames(counts) <- project_peak_ids
 cat("Matrix shape:", nrow(counts), "peaks x", ncol(counts), "cells\n\n")
 
 cat("[4/7] Creating Seurat object...\n")
@@ -625,7 +1117,24 @@ atac_obj <- TSSEnrichment(atac_obj, fast = FALSE)
 if (!is.null(barcode_prefilter_stats)) {
   fragment_stats <- barcode_prefilter_stats[barcode_prefilter_stats$CB %in% colnames(atac_obj), , drop = FALSE]
 } else {
-  fragment_stats <- CountFragments(fragment_file, cells = colnames(atac_obj))
+  fragment_stats <- tryCatch(
+    CountFragments(fragment_file, cells = colnames(atac_obj)),
+    error = function(e) {
+      warning(
+        "CountFragments failed for ",
+        basename(fragment_file),
+        ": ",
+        conditionMessage(e),
+        ". Falling back to nCount_ATAC for fragment totals."
+      )
+      fallback <- data.frame(
+        CB = colnames(atac_obj),
+        frequency_count = as.numeric(atac_obj$nCount_ATAC),
+        stringsAsFactors = FALSE
+      )
+      fallback
+    }
+  )
 }
 rownames(fragment_stats) <- fragment_stats$CB
 atac_obj$fragments <- fragment_stats[colnames(atac_obj), "frequency_count"]
@@ -693,12 +1202,119 @@ atac_obj@meta.data <- meta_data
 
 qc_cells <- rownames(meta_data)[meta_data$pass_qc %in% TRUE]
 qc_counts <- GetAssayData(atac_obj[["ATAC"]], layer = "counts")[, qc_cells, drop = FALSE]
+rownames(qc_counts) <- project_peak_ids
+
+meta_data$cima_cell_type_l1 <- NA_character_
+meta_data$cima_cell_type_l2 <- NA_character_
+meta_data$cima_cell_type_l3 <- NA_character_
+meta_data$cima_cell_type_l4 <- NA_character_
+meta_data$cima_l4_score <- NA_real_
+meta_data$cima_l4_score_margin <- NA_real_
+meta_data$umap_atac_1 <- NA_real_
+meta_data$umap_atac_2 <- NA_real_
+meta_data$cima_ref_umap_1 <- NA_real_
+meta_data$cima_ref_umap_2 <- NA_real_
+atac_obj@meta.data <- meta_data
 
 cat("Cells before QC:", nrow(meta_data), "\n")
 cat("Cells after QC:", length(qc_cells), "\n")
 cat("QC rate:", sprintf("%.2f%%", length(qc_cells) / nrow(meta_data) * 100), "\n\n")
 
-cat("[8/8] Building QC overview figure...\n")
+umap_l1_file <- file.path(output_dir, "umap_cima_cell_type_l1.png")
+umap_l2_file <- file.path(output_dir, "umap_cima_cell_type_l2.png")
+umap_l3_file <- file.path(output_dir, "umap_cima_cell_type_l3.png")
+umap_l4_file <- file.path(output_dir, "umap_cima_cell_type_l4.png")
+
+cat("[8/10] Assigning CIMA labels...\n")
+annotation_result <- annotate_cima_reference_model(qc_counts, cima_hierarchy, cima_feature_model, cima_centroids)
+annotation_df <- annotation_result$annotations
+query_cima_embeddings <- annotation_result$embeddings
+annotation_cols <- c(
+  "cima_cell_type_l1",
+  "cima_cell_type_l2",
+  "cima_cell_type_l3",
+  "cima_cell_type_l4",
+  "cima_l4_score",
+  "cima_l4_score_margin"
+)
+atac_obj@meta.data[annotation_df$cell_barcode, annotation_cols] <- annotation_df[, annotation_cols]
+cat("Assigned L4 labels:", length(unique(annotation_df$cima_cell_type_l4)), "\n\n")
+
+cat("[9/10] Running per-sample UMAP...\n")
+umap_plot_df <- NULL
+cima_palettes <- build_cima_palettes(cima_hierarchy)
+cima_umap_basis <- ""
+
+if (length(qc_cells) >= 3) {
+  atac_qc_obj <- subset(atac_obj, cells = qc_cells)
+  umap_result <- tryCatch(
+    run_single_sample_umap(atac_qc_obj),
+    error = function(e) {
+      message("UMAP failed for ", opt$gsm, ": ", conditionMessage(e))
+      NULL
+    }
+  )
+
+  if (!is.null(umap_result)) {
+    atac_qc_obj <- umap_result$object
+    umap_embeddings <- Embeddings(atac_qc_obj[["umap"]])
+    atac_obj@meta.data[rownames(umap_embeddings), c("umap_atac_1", "umap_atac_2")] <- umap_embeddings[, 1:2, drop = FALSE]
+    umap_plot_df <- data.frame(
+      cell_barcode = rownames(umap_embeddings),
+      UMAP_1 = umap_embeddings[, 1],
+      UMAP_2 = umap_embeddings[, 2],
+      atac_qc_obj@meta.data[, c("cima_cell_type_l1", "cima_cell_type_l2", "cima_cell_type_l3", "cima_cell_type_l4"), drop = FALSE],
+      stringsAsFactors = FALSE,
+      row.names = rownames(umap_embeddings)
+    )
+  }
+
+  cima_ref_result <- tryCatch(
+    run_cima_reference_umap(atac_qc_obj, query_cima_embeddings[qc_cells, , drop = FALSE]),
+    error = function(e) {
+      message("CIMA reference-space UMAP failed for ", opt$gsm, ": ", conditionMessage(e))
+      NULL
+    }
+  )
+
+  if (!is.null(cima_ref_result)) {
+    atac_cima_obj <- cima_ref_result$object
+    cima_ref_embeddings <- Embeddings(atac_cima_obj[["cima_ref_umap"]])
+    atac_obj@meta.data[rownames(cima_ref_embeddings), c("cima_ref_umap_1", "cima_ref_umap_2")] <- cima_ref_embeddings[, 1:2, drop = FALSE]
+    umap_plot_df <- data.frame(
+      cell_barcode = rownames(cima_ref_embeddings),
+      UMAP_1 = cima_ref_embeddings[, 1],
+      UMAP_2 = cima_ref_embeddings[, 2],
+      atac_cima_obj@meta.data[, c("cima_cell_type_l1", "cima_cell_type_l2", "cima_cell_type_l3", "cima_cell_type_l4"), drop = FALSE],
+      stringsAsFactors = FALSE,
+      row.names = rownames(cima_ref_embeddings)
+    )
+    cima_umap_basis <- "reference_projected_lsi"
+  } else if (!is.null(umap_plot_df)) {
+    cima_umap_basis <- "query_native_lsi"
+  }
+}
+
+if (is.null(umap_plot_df)) {
+  placeholder_df <- data.frame(
+    UMAP_1 = numeric(),
+    UMAP_2 = numeric(),
+    cima_cell_type_l1 = character(),
+    cima_cell_type_l2 = character(),
+    cima_cell_type_l3 = character(),
+    cima_cell_type_l4 = character(),
+    stringsAsFactors = FALSE
+  )
+  umap_plot_df <- placeholder_df
+  cima_umap_basis <- ""
+}
+
+save_cima_umap_plot(umap_plot_df, "cima_cell_type_l1", cima_palettes$cima_cell_type_l1, umap_l1_file, paste0(opt$gsm, " UMAP by CIMA L1"))
+save_cima_umap_plot(umap_plot_df, "cima_cell_type_l2", cima_palettes$cima_cell_type_l2, umap_l2_file, paste0(opt$gsm, " UMAP by CIMA L2"))
+save_cima_umap_plot(umap_plot_df, "cima_cell_type_l3", cima_palettes$cima_cell_type_l3, umap_l3_file, paste0(opt$gsm, " UMAP by CIMA L3"))
+save_cima_umap_plot(umap_plot_df, "cima_cell_type_l4", cima_palettes$cima_cell_type_l4, umap_l4_file, paste0(opt$gsm, " UMAP by CIMA L4"))
+
+cat("[10/10] Building QC overview figure...\n")
 p1 <- safe_plot(
   "QC Metrics",
   VlnPlot(
@@ -776,6 +1392,7 @@ ggsave(
   limitsize = FALSE
 )
 
+meta_data <- atac_obj@meta.data
 metadata_all <- cbind(cell_barcode = rownames(meta_data), meta_data)
 metadata_qc <- metadata_all[metadata_all$pass_qc %in% TRUE, , drop = FALSE]
 median_unique_ratio <- if ("unique_ratio" %in% colnames(atac_obj@meta.data)) {
@@ -783,6 +1400,12 @@ median_unique_ratio <- if ("unique_ratio" %in% colnames(atac_obj@meta.data)) {
 } else {
   ""
 }
+median_cima_l4_score <- if (all(is.na(metadata_qc$cima_l4_score))) {
+  ""
+} else {
+  sprintf("%.4f", median(metadata_qc$cima_l4_score, na.rm = TRUE))
+}
+unique_cima_l4 <- length(unique(metadata_qc$cima_cell_type_l4[!is.na(metadata_qc$cima_cell_type_l4)]))
 
 summary_stats <- data.frame(
   metric = c(
@@ -805,7 +1428,13 @@ summary_stats <- data.frame(
     "median_FRiP",
     "median_fragments",
     "median_unique_ratio",
-    "median_blacklist_fraction"
+    "median_blacklist_fraction",
+    "cima_reference_atac_h5ad",
+    "cima_reference_model_features",
+    "cima_annotation_levels",
+    "cima_umap_basis",
+    "cima_unique_l4_labels",
+    "median_cima_l4_score"
   ),
   value = c(
     opt$gse,
@@ -827,30 +1456,81 @@ summary_stats <- data.frame(
     sprintf("%.4f", median(atac_obj$FRiP[atac_obj$pass_qc], na.rm = TRUE)),
     sprintf("%.0f", median(atac_obj$fragments[atac_obj$pass_qc], na.rm = TRUE)),
     median_unique_ratio,
-    sprintf("%.4f", median(atac_obj$blacklist_fraction[atac_obj$pass_qc], na.rm = TRUE))
+    sprintf("%.4f", median(atac_obj$blacklist_fraction[atac_obj$pass_qc], na.rm = TRUE)),
+    cima_reference_file,
+    cima_feature_model_file,
+    "l1,l2,l3,l4",
+    cima_umap_basis,
+    unique_cima_l4,
+    median_cima_l4_score
   ),
   stringsAsFactors = FALSE
 )
 
-feature_file <- file.path(matrix_dir, "features.tsv.gz")
-barcode_out_file <- file.path(matrix_dir, "barcodes.tsv.gz")
+feature_file <- if (is_lite_output) file.path(matrix_dir, "features.tsv") else file.path(matrix_dir, "features.tsv.gz")
+barcode_out_file <- if (is_lite_output) file.path(matrix_dir, "barcodes.tsv") else file.path(matrix_dir, "barcodes.tsv.gz")
 matrix_file <- file.path(matrix_dir, "matrix.mtx")
 metadata_file <- file.path(output_dir, "metadata.csv")
 metadata_qc_file <- file.path(output_dir, "metadata_qc.csv")
 summary_file <- file.path(output_dir, "qc_summary.csv")
 rds_file <- file.path(output_dir, paste0(opt$gsm, "_seurat_qc.rds"))
+validation_file <- file.path(output_dir, "validation_result.csv")
 
-writeMM(qc_counts, matrix_file)
-write_lines_gz(rownames(qc_counts), feature_file)
-write_lines_gz(colnames(qc_counts), barcode_out_file)
-write.csv(metadata_all, metadata_file, row.names = FALSE)
-write.csv(metadata_qc, metadata_qc_file, row.names = FALSE)
+validation_keep <- intersect(
+  c(
+    "cell_barcode",
+    "seurat_clusters",
+    "nCount_ATAC",
+    "nFeature_ATAC",
+    "TSS.enrichment",
+    "nucleosome_signal",
+    "FRiP",
+    "blacklist_fraction",
+    "scDblFinder.class",
+    "cima_cell_type_l1",
+    "cima_cell_type_l2",
+    "cima_cell_type_l3",
+    "cima_cell_type_l4",
+    "cima_l4_score",
+    "cima_l4_score_margin",
+    "umap_atac_1",
+    "umap_atac_2",
+    "cima_ref_umap_1",
+    "cima_ref_umap_2"
+  ),
+  colnames(metadata_qc)
+)
+validation_result <- metadata_qc[, validation_keep, drop = FALSE]
+
 write.csv(summary_stats, summary_file, row.names = FALSE)
-saveRDS(atac_obj, rds_file)
+write.csv(validation_result, validation_file, row.names = FALSE)
+writeMM(qc_counts, matrix_file)
+if (is_lite_output) {
+  write_lines_plain(rownames(qc_counts), feature_file)
+  write_lines_plain(colnames(qc_counts), barcode_out_file)
+} else {
+  write_lines_gz(rownames(qc_counts), feature_file)
+  write_lines_gz(colnames(qc_counts), barcode_out_file)
+}
 
-cat("QC overview:", qc_plot_file, "\n")
-cat("QC matrix:", matrix_file, "\n")
-cat("Metadata:", metadata_file, "\n")
-cat("QC metadata:", metadata_qc_file, "\n")
+if (!is_lite_output) {
+  write.csv(metadata_all, metadata_file, row.names = FALSE)
+  write.csv(metadata_qc, metadata_qc_file, row.names = FALSE)
+  saveRDS(atac_obj, rds_file)
+} else {
+  suppressWarnings(file.remove(qc_plot_file, umap_l2_file, umap_l3_file, umap_l4_file))
+}
+
+cat("UMAP L1:", umap_l1_file, "\n")
 cat("Summary:", summary_file, "\n")
-cat("RDS:", rds_file, "\n")
+cat("Validation result:", validation_file, "\n")
+cat("QC matrix:", matrix_file, "\n")
+if (!is_lite_output) {
+  cat("QC overview:", qc_plot_file, "\n")
+  cat("UMAP L2:", umap_l2_file, "\n")
+  cat("UMAP L3:", umap_l3_file, "\n")
+  cat("UMAP L4:", umap_l4_file, "\n")
+  cat("Metadata:", metadata_file, "\n")
+  cat("QC metadata:", metadata_qc_file, "\n")
+  cat("RDS:", rds_file, "\n")
+}
