@@ -1,5 +1,30 @@
 #!/usr/bin/env Rscript
 
+get_script_path <- function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  file_arg <- "--file="
+  matches <- grep(file_arg, args, value = TRUE)
+  if (length(matches) == 0) {
+    stop("Unable to determine script path from commandArgs()")
+  }
+  normalizePath(sub(file_arg, "", matches[1]), winslash = "/", mustWork = TRUE)
+}
+
+project_root <- normalizePath(
+  file.path(dirname(get_script_path()), "..", ".."),
+  winslash = "/",
+  mustWork = TRUE
+)
+
+project_r_lib <- if (.Platform$OS.type == "windows") {
+  file.path(project_root, ".r-win-library")
+} else {
+  file.path(project_root, ".r-linux-library")
+}
+if (dir.exists(project_r_lib)) {
+  .libPaths(c(project_r_lib, .libPaths()))
+}
+
 suppressPackageStartupMessages({
   library(optparse)
   library(Signac)

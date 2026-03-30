@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -41,14 +41,18 @@ class Sample:
 
 
 def utc_now() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def discover_samples(gse: str | None = None) -> list[Sample]:
     if not RAW_DIR.exists():
         raise FileNotFoundError(f"Raw data directory not found: {RAW_DIR}")
 
-    gse_dirs = [RAW_DIR / gse] if gse else sorted(path for path in RAW_DIR.iterdir() if path.is_dir())
+    gse_dirs = (
+        [RAW_DIR / gse]
+        if gse
+        else sorted(path for path in RAW_DIR.iterdir() if path.is_dir())
+    )
     samples: list[Sample] = []
 
     for gse_dir in gse_dirs:
@@ -66,7 +70,9 @@ def discover_samples(gse: str | None = None) -> list[Sample]:
         for gsm, matches in sorted(by_gsm.items()):
             if len(matches) != 1:
                 names = ", ".join(path.name for path in matches)
-                raise RuntimeError(f"Multiple fragment files found for {gse_dir.name}/{gsm}: {names}")
+                raise RuntimeError(
+                    f"Multiple fragment files found for {gse_dir.name}/{gsm}: {names}"
+                )
             samples.append(Sample(gse=gse_dir.name, gsm=gsm, fragment_file=matches[0]))
 
     return samples
@@ -79,32 +85,72 @@ def find_sample(gse: str, gsm: str) -> Sample:
     raise FileNotFoundError(f"Sample not found: {gse}/{gsm}")
 
 
-def expected_outputs(sample: Sample) -> list[Path]:
+def sample_output_dir(sample: Sample, output_root: Path) -> Path:
+    return output_root / sample.gse / sample.gsm
+
+
+def sample_log_file(sample: Sample, output_root: Path) -> Path:
+    return sample_output_dir(sample, output_root) / "logs" / "sample_qc.log"
+
+
+def sample_status_file(sample: Sample, output_root: Path) -> Path:
+    return sample_output_dir(sample, output_root) / "run_status.json"
+
+
+def expected_outputs(
+    sample: Sample, output_profile: str = "full", output_root: Path = OUTPUT_DIR
+) -> list[Path]:
+    output_dir = sample_output_dir(sample, output_root)
+    if output_profile in {"matrix-lite", "validation-lite"}:
+        return [
+            output_dir / "umap_cima_cell_type_l1.png",
+            output_dir / "qc_summary.csv",
+            output_dir / "validation_result.csv",
+            output_dir / "matrix" / "matrix.mtx",
+            output_dir / "matrix" / "barcodes.tsv",
+            output_dir / "matrix" / "features.tsv",
+        ]
+
     return [
-        sample.output_dir / "qc_overview.png",
-        sample.output_dir / "metadata.csv",
-        sample.output_dir / "metadata_qc.csv",
-        sample.output_dir / "qc_summary.csv",
-        sample.output_dir / "matrix" / "matrix.mtx",
-        sample.output_dir / "matrix" / "barcodes.tsv.gz",
-        sample.output_dir / "matrix" / "features.tsv.gz",
-        sample.output_dir / f"{sample.gsm}_seurat_qc.rds",
+        output_dir / "qc_overview.png",
+        output_dir / "umap_cima_cell_type_l1.png",
+        output_dir / "umap_cima_cell_type_l2.png",
+        output_dir / "umap_cima_cell_type_l3.png",
+        output_dir / "umap_cima_cell_type_l4.png",
+        output_dir / "metadata.csv",
+        output_dir / "metadata_qc.csv",
+        output_dir / "qc_summary.csv",
+        output_dir / "matrix" / "matrix.mtx",
+        output_dir / "matrix" / "barcodes.tsv.gz",
+        output_dir / "matrix" / "features.tsv.gz",
+        output_dir / f"{sample.gsm}_seurat_qc.rds",
     ]
 
 
-def outputs_complete(sample: Sample) -> bool:
-    return all(path.exists() for path in expected_outputs(sample))
+def outputs_complete(
+    sample: Sample, output_profile: str = "full", output_root: Path = OUTPUT_DIR
+) -> bool:
+    return all(
+        path.exists()
+        for path in expected_outputs(
+            sample, output_profile=output_profile, output_root=output_root
+        )
+    )
 
 
-def load_status(sample: Sample) -> dict | None:
-    if not sample.status_file.exists():
+def load_status(sample: Sample, output_root: Path = OUTPUT_DIR) -> dict | None:
+    status_file = sample_status_file(sample, output_root)
+    if not status_file.exists():
         return None
-    return json.loads(sample.status_file.read_text())
+    return json.loads(status_file.read_text())
 
 
-def write_status(sample: Sample, payload: dict) -> None:
-    sample.output_dir.mkdir(parents=True, exist_ok=True)
-    sample.status_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+def write_status(sample: Sample, payload: dict, output_root: Path = OUTPUT_DIR) -> None:
+    output_dir = sample_output_dir(sample, output_root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sample_status_file(sample, output_root).write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    )
 
 
 def run_command(command: list[str], log_file: Path) -> int:
@@ -187,8 +233,19 @@ def run_download(
     return run_command(command, log_file)
 
 
-def run_sample(sample: Sample, rscript: str, nmads: float, force: bool, dry_run: bool) -> int:
-    if outputs_complete(sample) and not force:
+def run_sample(
+    sample: Sample,
+    rscript: str,
+    nmads: float,
+    output_profile: str,
+    output_root: Path,
+    force: bool,
+    dry_run: bool,
+) -> int:
+    if (
+        outputs_complete(sample, output_profile=output_profile, output_root=output_root)
+        and not force
+    ):
         print(f"[skip] {sample.gse}/{sample.gsm} already has complete outputs")
         return 0
 
@@ -201,15 +258,21 @@ def run_sample(sample: Sample, rscript: str, nmads: float, force: bool, dry_run:
         sample.gsm,
         "--nmads",
         str(nmads),
+        "--output-profile",
+        output_profile,
+        "--output-root",
+        str(output_root),
     ]
 
     status_payload = {
         "sample": {"gse": sample.gse, "gsm": sample.gsm},
         "command": command,
+        "output_profile": output_profile,
+        "output_root": str(output_root),
         "started_at": utc_now(),
         "status": "running",
     }
-    write_status(sample, status_payload)
+    write_status(sample, status_payload, output_root=output_root)
 
     print(f"[run] {sample.gse}/{sample.gsm}")
     print(" ".join(command))
@@ -217,15 +280,24 @@ def run_sample(sample: Sample, rscript: str, nmads: float, force: bool, dry_run:
     if dry_run:
         status_payload["status"] = "dry_run"
         status_payload["finished_at"] = utc_now()
-        write_status(sample, status_payload)
+        write_status(sample, status_payload, output_root=output_root)
         return 0
 
-    returncode = run_command(command, sample.log_file)
+    returncode = run_command(command, sample_log_file(sample, output_root))
     status_payload["finished_at"] = utc_now()
     status_payload["returncode"] = returncode
-    status_payload["outputs_complete"] = outputs_complete(sample)
-    status_payload["status"] = "success" if returncode == 0 and outputs_complete(sample) else "failed"
-    write_status(sample, status_payload)
+    status_payload["outputs_complete"] = outputs_complete(
+        sample, output_profile=output_profile, output_root=output_root
+    )
+    status_payload["status"] = (
+        "success"
+        if returncode == 0
+        and outputs_complete(
+            sample, output_profile=output_profile, output_root=output_root
+        )
+        else "failed"
+    )
+    write_status(sample, status_payload, output_root=output_root)
 
     return returncode
 
@@ -241,10 +313,12 @@ def print_status(samples: Iterable[Sample]) -> None:
     for sample in samples:
         payload = load_status(sample) or {}
         status = payload.get("status", "pending")
+        output_profile = payload.get("output_profile", "full")
+        output_root = Path(payload.get("output_root", str(OUTPUT_DIR)))
         finished_at = payload.get("finished_at", "")
         print(
             f"{sample.gse}\t{sample.gsm}\t{status}\t"
-            f"{str(outputs_complete(sample)).lower()}\t{finished_at}"
+            f"{str(outputs_complete(sample, output_profile=output_profile, output_root=output_root)).lower()}\t{finished_at}"
         )
 
 
@@ -260,22 +334,30 @@ def build_parser() -> argparse.ArgumentParser:
     run_sample_parser.add_argument("--gsm", required=True)
     run_sample_parser.add_argument("--nmads", type=float, default=4)
     run_sample_parser.add_argument("--rscript", default="Rscript")
+    run_sample_parser.add_argument("--output-profile", default="full")
+    run_sample_parser.add_argument("--output-root", default=str(OUTPUT_DIR))
     run_sample_parser.add_argument("--force", action="store_true")
     run_sample_parser.add_argument("--dry-run", action="store_true")
 
-    run_gse_parser = subparsers.add_parser("run-gse", help="Run all samples under one GSE")
+    run_gse_parser = subparsers.add_parser(
+        "run-gse", help="Run all samples under one GSE"
+    )
     run_gse_parser.add_argument("--gse", required=True)
     run_gse_parser.add_argument("--nmads", type=float, default=4)
     run_gse_parser.add_argument("--rscript", default="Rscript")
+    run_gse_parser.add_argument("--output-profile", default="full")
+    run_gse_parser.add_argument("--output-root", default=str(OUTPUT_DIR))
     run_gse_parser.add_argument("--force", action="store_true")
     run_gse_parser.add_argument("--dry-run", action="store_true")
 
-    download_parser = subparsers.add_parser("download", help="Download GEO files based on datasets.xlsx filtering")
+    download_parser = subparsers.add_parser(
+        "download", help="Download GEO files based on datasets.xlsx filtering"
+    )
     download_parser.add_argument("--assay", default="scATAC")
     download_parser.add_argument("--data-format", default="fragment")
     download_parser.add_argument("--gse", default="")
     download_parser.add_argument("--gsm", default="")
-    download_parser.add_argument("--file-kinds", default="fragment,barcode")
+    download_parser.add_argument("--file-kinds", default="fragment,barcode,singlecell")
     download_parser.add_argument("--aria2c", default="aria2c")
     download_parser.add_argument("--python-bin", default=sys.executable or "python3")
     download_parser.add_argument("--dry-run", action="store_true")
@@ -310,6 +392,8 @@ def main() -> int:
             sample=sample,
             rscript=args.rscript,
             nmads=args.nmads,
+            output_profile=args.output_profile,
+            output_root=Path(args.output_root),
             force=args.force,
             dry_run=args.dry_run,
         )
@@ -322,6 +406,8 @@ def main() -> int:
                 sample=sample,
                 rscript=args.rscript,
                 nmads=args.nmads,
+                output_profile=args.output_profile,
+                output_root=Path(args.output_root),
                 force=args.force,
                 dry_run=args.dry_run,
             )
