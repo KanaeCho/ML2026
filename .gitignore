@@ -18,6 +18,7 @@ wheels/
 wangdao/
 dive-into-llms/
 data/raw/
+output
 output/
 **/*.gz
 **/*.txt
