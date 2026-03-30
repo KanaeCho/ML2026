@@ -22,3 +22,6 @@ output/
 **/*.gz
 **/*.txt
 **/*.tbi
+3
+data/reference/datasets旧版本.xlsx
+data/reference/cima/*.h5ad
