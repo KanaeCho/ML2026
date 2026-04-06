@@ -7,7 +7,7 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv/
+.venv*/
 .agents/
 .r-win-library/
 .r-linux-library/
@@ -17,12 +17,5 @@ wheels/
 
 wangdao/
 dive-into-llms/
-data/raw/
+data
 output
-output/
-**/*.gz
-**/*.txt
-**/*.tbi
-3
-data/reference/datasets旧版本.xlsx
-data/reference/cima/*.h5ad
