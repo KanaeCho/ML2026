@@ -9,6 +9,7 @@ dependencies = [
     "bbknn>=1.6.0",
     "datasets>=4.7.0",
     "geoparse>=2.0.4",
+    "h5py>=3.16.0",
     "matplotlib>=3.10.8",
     "numpy>=2.4.2",
     "openpyxl>=3.1.5",

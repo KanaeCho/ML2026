@@ -18,6 +18,7 @@ RAW_DIR = ROOT / "data" / "raw"
 OUTPUT_DIR = ROOT / "output"
 R_SCRIPT = ROOT / "scripts" / "process" / "process_single_sample.R"
 DOWNLOAD_SCRIPT = ROOT / "scripts" / "process" / "download_from_datasets.py"
+TEA_SEQ_AUDIT_SCRIPT = ROOT / "scripts" / "process" / "organize_tea_seq_outputs.py"
 FRAGMENT_RE = re.compile(r"^(GSM\d+)_.*fragments.*\.tsv\.gz$")
 
 
@@ -77,7 +78,6 @@ def discover_samples(gse: str | None = None) -> list[Sample]:
 
     return samples
 
-
 def find_sample(gse: str, gsm: str) -> Sample:
     for sample in discover_samples(gse=gse):
         if sample.gsm == gsm:
@@ -95,7 +95,6 @@ def sample_log_file(sample: Sample, output_root: Path) -> Path:
 
 def sample_status_file(sample: Sample, output_root: Path) -> Path:
     return sample_output_dir(sample, output_root) / "run_status.json"
-
 
 def expected_outputs(
     sample: Sample, output_profile: str = "full", output_root: Path = OUTPUT_DIR
@@ -152,7 +151,6 @@ def write_status(sample: Sample, payload: dict, output_root: Path = OUTPUT_DIR) 
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     )
 
-
 def run_command(command: list[str], log_file: Path) -> int:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     process = subprocess.Popen(
@@ -183,6 +181,7 @@ def run_download(
     file_kinds: str,
     aria2c: str,
     dry_run: bool,
+    include_hidden_rows: bool,
     skip_network_resolve: bool,
     max_concurrent_downloads: int,
     split: int,
@@ -192,15 +191,15 @@ def run_download(
 ) -> int:
     log_dir = RAW_DIR / "_download_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"download_{assay}_{data_format}.log"
+    assay_tag = re.sub(r"[^A-Za-z0-9._-]+", "-", assay).strip("-") or "all-assays"
+    format_tag = (
+        re.sub(r"[^A-Za-z0-9._-]+", "-", data_format).strip("-") or "all-formats"
+    )
+    log_file = log_dir / f"download_{assay_tag}_{format_tag}.log"
 
     command = [
         python_bin,
         str(DOWNLOAD_SCRIPT),
-        "--assay",
-        assay,
-        "--data-format",
-        data_format,
         "--file-kinds",
         file_kinds,
         "--aria2c",
@@ -212,6 +211,11 @@ def run_download(
         "--network-timeout",
         str(network_timeout),
     ]
+
+    if assay:
+        command.extend(["--assay", assay])
+    if data_format:
+        command.extend(["--data-format", data_format])
 
     if gse:
         command.extend(["--gse", gse])
@@ -225,10 +229,47 @@ def run_download(
 
     if dry_run:
         command.append("--dry-run")
+    if include_hidden_rows:
+        command.append("--include-hidden-rows")
     if skip_network_resolve:
         command.append("--skip-network-resolve")
 
     print("[download]")
+    print(" ".join(command))
+    return run_command(command, log_file)
+
+
+def run_tea_seq_audit(
+    python_bin: str,
+    gse: str,
+    dry_run: bool,
+    delete_legacy: bool,
+    score_threshold: float,
+    margin_threshold: float,
+    low_purity_threshold: float,
+) -> int:
+    audit_dir = OUTPUT_DIR / gse / "qc_audit"
+    log_file = audit_dir / "tea_seq_audit.log"
+    command = [
+        python_bin,
+        str(TEA_SEQ_AUDIT_SCRIPT),
+        "--gse",
+        gse,
+        "--project-root",
+        str(ROOT),
+        "--score-threshold",
+        str(score_threshold),
+        "--margin-threshold",
+        str(margin_threshold),
+        "--low-purity-threshold",
+        str(low_purity_threshold),
+    ]
+    if dry_run:
+        command.append("--dry-run")
+    if delete_legacy:
+        command.append("--delete-legacy")
+
+    print("[tea-seq-audit]")
     print(" ".join(command))
     return run_command(command, log_file)
 
@@ -301,7 +342,6 @@ def run_sample(
 
     return returncode
 
-
 def print_discovery(samples: Iterable[Sample]) -> None:
     print("gse\tgsm\tfragment_file")
     for sample in samples:
@@ -320,7 +360,6 @@ def print_status(samples: Iterable[Sample]) -> None:
             f"{sample.gse}\t{sample.gsm}\t{status}\t"
             f"{str(outputs_complete(sample, output_profile=output_profile, output_root=output_root)).lower()}\t{finished_at}"
         )
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage scATAC single-sample QC runs")
@@ -353,14 +392,22 @@ def build_parser() -> argparse.ArgumentParser:
     download_parser = subparsers.add_parser(
         "download", help="Download GEO files based on datasets.xlsx filtering"
     )
-    download_parser.add_argument("--assay", default="scATAC")
-    download_parser.add_argument("--data-format", default="fragment")
+    download_parser.add_argument("--assay", default="")
+    download_parser.add_argument("--data-format", default="")
     download_parser.add_argument("--gse", default="")
     download_parser.add_argument("--gsm", default="")
-    download_parser.add_argument("--file-kinds", default="fragment,barcode,singlecell")
+    download_parser.add_argument(
+        "--file-kinds",
+        default="all",
+        help=(
+            "Comma-separated kinds: all, count-matrix, fragment, barcode, singlecell, "
+            "summary, h5, metadata"
+        ),
+    )
     download_parser.add_argument("--aria2c", default="aria2c")
     download_parser.add_argument("--python-bin", default=sys.executable or "python3")
     download_parser.add_argument("--dry-run", action="store_true")
+    download_parser.add_argument("--include-hidden-rows", action="store_true")
     download_parser.add_argument("--skip-network-resolve", action="store_true")
     download_parser.add_argument("--max-concurrent-downloads", type=int, default=4)
     download_parser.add_argument("--split", type=int, default=8)
@@ -370,6 +417,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status", help="Show run status")
     status_parser.add_argument("--gse", help="Restrict status to one GSE")
+
+    tea_seq_parser = subparsers.add_parser(
+        "tea-seq-audit",
+        help="Organize TEA-seq accepted outputs and write a dataset-level QC audit",
+    )
+    tea_seq_parser.add_argument("--gse", required=True)
+    tea_seq_parser.add_argument("--python-bin", default=sys.executable or "python3")
+    tea_seq_parser.add_argument("--dry-run", action="store_true")
+    tea_seq_parser.add_argument("--delete-legacy", action="store_true")
+    tea_seq_parser.add_argument("--score-threshold", type=float, default=0.4)
+    tea_seq_parser.add_argument("--margin-threshold", type=float, default=0.1)
+    tea_seq_parser.add_argument("--low-purity-threshold", type=float, default=0.8)
 
     return parser
 
@@ -385,6 +444,17 @@ def main() -> int:
     if args.command == "status":
         print_status(discover_samples(gse=args.gse))
         return 0
+
+    if args.command == "tea-seq-audit":
+        return run_tea_seq_audit(
+            python_bin=args.python_bin,
+            gse=args.gse,
+            dry_run=args.dry_run,
+            delete_legacy=args.delete_legacy,
+            score_threshold=args.score_threshold,
+            margin_threshold=args.margin_threshold,
+            low_purity_threshold=args.low_purity_threshold,
+        )
 
     if args.command == "run-sample":
         sample = find_sample(args.gse, args.gsm)
@@ -425,6 +495,7 @@ def main() -> int:
             file_kinds=args.file_kinds,
             aria2c=args.aria2c,
             dry_run=args.dry_run,
+            include_hidden_rows=args.include_hidden_rows,
             skip_network_resolve=args.skip_network_resolve,
             max_concurrent_downloads=args.max_concurrent_downloads,
             split=args.split,
