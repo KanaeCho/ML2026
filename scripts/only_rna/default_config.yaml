@@ -1,0 +1,12 @@
+qc:
+  min_counts: 500
+  min_genes: 300
+  max_pct_mt: 20.0
+  max_pct_ribo: 60.0
+plotting:
+  umap_width: 10.0
+  umap_height: 8.0
+  dpi: 180
+  point_size: 3.0
+  legend_fontsize: 10.0
+  legend_title_fontsize: 11.0
