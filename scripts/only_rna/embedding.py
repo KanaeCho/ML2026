@@ -53,11 +53,13 @@ def _run_scanpy_embedding(pass_qc_adata: ad.AnnData, config: RunConfig) -> ad.An
     if out.n_obs >= 3:
         try:
             sc.tl.leiden(out, key_added="cluster")
-            sc.tl.umap(out)
         except ImportError:
             out.obs["cluster"] = pd.Series(
                 ["0"] * out.n_obs, index=out.obs_names, dtype="string"
             )
+        try:
+            sc.tl.umap(out)
+        except ImportError:
             out.obsm["X_umap"] = np.column_stack(
                 [np.arange(out.n_obs, dtype=float), np.zeros(out.n_obs, dtype=float)]
             )

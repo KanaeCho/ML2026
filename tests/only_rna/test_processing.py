@@ -465,7 +465,14 @@ def test_run_embedding_falls_back_when_leiden_dependency_missing(monkeypatch):
     def raise_missing_igraph(*args, **kwargs):
         raise ImportError("Please install the igraph package")
 
+    def fake_umap(current, **kwargs):
+        del kwargs
+        current.obsm["X_umap"] = np.array(
+            [[10.0, 1.0], [11.5, 2.5], [13.0, 4.0]], dtype=float
+        )
+
     monkeypatch.setattr("scripts.only_rna.embedding.sc.tl.leiden", raise_missing_igraph)
+    monkeypatch.setattr("scripts.only_rna.embedding.sc.tl.umap", fake_umap)
 
     out = run_embedding(adata, config)
 
@@ -475,14 +482,14 @@ def test_run_embedding_falls_back_when_leiden_dependency_missing(monkeypatch):
         "0",
     ]
     assert out.obs.loc[["cell-1", "cell-2", "cell-3"], "umap_1"].tolist() == [
-        0.0,
-        1.0,
-        2.0,
+        10.0,
+        11.5,
+        13.0,
     ]
     assert out.obs.loc[["cell-1", "cell-2", "cell-3"], "umap_2"].tolist() == [
-        0.0,
-        0.0,
-        0.0,
+        1.0,
+        2.5,
+        4.0,
     ]
     assert out.obs.loc["cell-4", "cluster"] is pd.NA or pd.isna(
         out.obs.loc["cell-4", "cluster"]
