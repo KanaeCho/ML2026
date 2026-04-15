@@ -35,17 +35,39 @@ def save_categorical_umap(
     config: RunConfig,
 ) -> None:
     plotting = config.plotting
+    display_point_size = max(
+        float(plotting.point_size) * 1.1, float(plotting.point_size) + 1.0
+    )
     legend_location = getattr(plotting, "legend_location", "center left")
-    legend_ncols = int(getattr(plotting, "legend_ncols", 1))
+    legend_ncols = int(getattr(plotting, "legend_ncols", 0))
     legend_bbox_to_anchor = getattr(plotting, "legend_bbox_to_anchor", (1.02, 0.5))
+    legend_markerscale = float(getattr(plotting, "legend_markerscale", 4.0))
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     frame = _plot_frame(adata, color_key)
+    categories: list[str] = []
+    if not frame.empty:
+        categories = sorted(frame[color_key].astype(str).unique().tolist())
+        if legend_ncols <= 0:
+            if color_key == "cima_l2" and len(categories) >= 18:
+                legend_ncols = 2
+            elif len(categories) >= 24:
+                legend_ncols = 3
+            elif len(categories) >= 12:
+                legend_ncols = 2
+            else:
+                legend_ncols = 1
+
+    figure_width: float = float(plotting.umap_width)
+    if categories:
+        figure_width = figure_width + max(1.5, 0.9 * float(legend_ncols))
+
     fig, ax = plt.subplots(
-        figsize=(plotting.umap_width, plotting.umap_height),
+        figsize=(figure_width, plotting.umap_height),
         dpi=plotting.dpi,
     )
+    ax.set_box_aspect(1)
 
     if frame.empty:
         ax.set_title(title)
@@ -57,14 +79,13 @@ def save_categorical_umap(
         ax.set_xticks([])
         ax.set_yticks([])
     else:
-        categories = sorted(frame[color_key].astype(str).unique().tolist())
         cmap = plt.get_cmap("tab20", max(len(categories), 1))
         for idx, category in enumerate(categories):
             subset = frame.loc[frame[color_key].astype(str) == category]
             ax.scatter(
                 subset["umap_1"],
                 subset["umap_2"],
-                s=plotting.point_size,
+                s=display_point_size,
                 c=[cmap(idx)],
                 label=category,
                 linewidths=0,
@@ -79,6 +100,7 @@ def save_categorical_umap(
             frameon=False,
             fontsize=plotting.legend_fontsize,
             title_fontsize=plotting.legend_title_fontsize,
+            markerscale=legend_markerscale,
         )
         if legend is not None:
             legend._legend_box.align = "left"
@@ -86,8 +108,9 @@ def save_categorical_umap(
         ax.set_title(title)
         ax.set_xlabel("umap_1")
         ax.set_ylabel("umap_2")
+        ax.set_aspect("auto")
 
-    fig.tight_layout()
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 1.0))
     fig.savefig(output_path, dpi=plotting.dpi, format="png")
     plt.close(fig)
 

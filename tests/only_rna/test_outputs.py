@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import anndata as ad
+import matplotlib.axes
 import matplotlib.image as mpimg
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy import sparse
@@ -84,6 +86,214 @@ def test_save_categorical_umap_creates_png_with_config_dimensions(tmp_path: Path
     image = mpimg.imread(output_path)
     assert image.shape[1] == int(config.plotting.umap_width * config.plotting.dpi)
     assert image.shape[0] == int(config.plotting.umap_height * config.plotting.dpi)
+
+
+def test_save_categorical_umap_uses_readable_legend_markers_and_layout(
+    tmp_path: Path, monkeypatch
+):
+    config = _make_run_config()
+    adata = ad.AnnData(
+        X=sparse.csr_matrix(np.eye(14)),
+        obs=pd.DataFrame(
+            {
+                "umap_1": np.linspace(0.0, 13.0, 14),
+                "umap_2": np.linspace(1.0, 14.0, 14),
+                "cluster": [str(i) for i in range(14)],
+            },
+            index=[f"cell-{i}" for i in range(14)],
+        ),
+    )
+
+    captured: dict[str, object] = {}
+    original_legend = matplotlib.axes.Axes.legend
+
+    def capture_legend(self, *args, **kwargs):
+        captured.update(kwargs)
+        return original_legend(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "legend", capture_legend)
+
+    output_path = tmp_path / "legend_readable.png"
+    save_categorical_umap(
+        adata,
+        color_key="cluster",
+        output_path=output_path,
+        title="Legend readability",
+        config=config,
+    )
+
+    assert output_path.exists()
+    assert captured["markerscale"] > 1.0
+    assert captured["ncol"] > 1
+
+
+def test_save_categorical_umap_keeps_readable_panel_for_many_categories(
+    tmp_path: Path, monkeypatch
+):
+    config = _make_run_config()
+    adata = ad.AnnData(
+        X=sparse.csr_matrix(np.eye(27)),
+        obs=pd.DataFrame(
+            {
+                "umap_1": np.linspace(-5.0, 5.0, 27),
+                "umap_2": np.linspace(-3.0, 3.0, 27),
+                "cima_l2": [f"L2_{i}" for i in range(27)],
+            },
+            index=[f"cell-{i}" for i in range(27)],
+        ),
+    )
+
+    captured: dict[str, object] = {}
+    original_subplots = plt.subplots
+
+    def capture_subplots(*args, **kwargs):
+        captured["figsize"] = kwargs.get("figsize")
+        captured["dpi"] = kwargs.get("dpi")
+        fig, ax = original_subplots(*args, **kwargs)
+
+        original_tight_layout = fig.tight_layout
+
+        def capture_tight_layout(*layout_args, **layout_kwargs):
+            captured["tight_layout_args"] = layout_args
+            captured["tight_layout_kwargs"] = layout_kwargs
+            return original_tight_layout(*layout_args, **layout_kwargs)
+
+        fig.tight_layout = capture_tight_layout
+
+        original_set_aspect = ax.set_aspect
+        original_set_box_aspect = ax.set_box_aspect
+
+        def capture_set_aspect(*aspect_args, **aspect_kwargs):
+            captured["set_aspect_args"] = aspect_args
+            captured["set_aspect_kwargs"] = aspect_kwargs
+            return original_set_aspect(*aspect_args, **aspect_kwargs)
+
+        def capture_set_box_aspect(*box_aspect_args, **box_aspect_kwargs):
+            captured["set_box_aspect_args"] = box_aspect_args
+            captured["set_box_aspect_kwargs"] = box_aspect_kwargs
+            return original_set_box_aspect(*box_aspect_args, **box_aspect_kwargs)
+
+        ax.set_aspect = capture_set_aspect
+        ax.set_box_aspect = capture_set_box_aspect
+        return fig, ax
+
+    original_legend = matplotlib.axes.Axes.legend
+
+    def capture_legend(self, *args, **kwargs):
+        captured.update(
+            {
+                "ncol": kwargs.get("ncol"),
+                "markerscale": kwargs.get("markerscale"),
+                "bbox_to_anchor": kwargs.get("bbox_to_anchor"),
+                "loc": kwargs.get("loc"),
+            }
+        )
+        return original_legend(self, *args, **kwargs)
+
+    monkeypatch.setattr(plt, "subplots", capture_subplots)
+    monkeypatch.setattr(matplotlib.axes.Axes, "legend", capture_legend)
+
+    output_path = tmp_path / "l2_many_categories.png"
+    save_categorical_umap(
+        adata,
+        color_key="cima_l2",
+        output_path=output_path,
+        title="L2 readability",
+        config=config,
+    )
+
+    assert output_path.exists()
+    assert captured["figsize"][1] == config.plotting.umap_height
+    assert captured["dpi"] == config.plotting.dpi
+    assert captured["markerscale"] >= 4.0
+    assert captured["ncol"] >= 2
+    assert captured["loc"] == "center left"
+    assert captured["bbox_to_anchor"] is not None
+    assert captured["figsize"][0] > config.plotting.umap_width
+    assert captured["figsize"][1] == config.plotting.umap_height
+    assert captured["set_box_aspect_args"][0] == 1
+    assert captured["tight_layout_kwargs"]["rect"] == (0.0, 0.0, 1.0, 1.0)
+
+
+def test_save_categorical_umap_uses_taller_fewer_columns_for_l2_legend(
+    tmp_path: Path, monkeypatch
+):
+    config = _make_run_config()
+    adata = ad.AnnData(
+        X=sparse.csr_matrix(np.eye(27)),
+        obs=pd.DataFrame(
+            {
+                "umap_1": np.linspace(-5.0, 5.0, 27),
+                "umap_2": np.linspace(-3.0, 3.0, 27),
+                "cima_l2": [f"L2_{i}" for i in range(27)],
+            },
+            index=[f"cell-{i}" for i in range(27)],
+        ),
+    )
+
+    captured: dict[str, object] = {}
+    original_legend = matplotlib.axes.Axes.legend
+
+    def capture_legend(self, *args, **kwargs):
+        captured.update(
+            {
+                "ncol": kwargs.get("ncol"),
+                "bbox_to_anchor": kwargs.get("bbox_to_anchor"),
+                "loc": kwargs.get("loc"),
+            }
+        )
+        return original_legend(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "legend", capture_legend)
+
+    output_path = tmp_path / "l2_taller_columns.png"
+    save_categorical_umap(
+        adata,
+        color_key="cima_l2",
+        output_path=output_path,
+        title="L2 taller columns",
+        config=config,
+    )
+
+    assert output_path.exists()
+    assert captured["loc"] == "center left"
+    assert captured["bbox_to_anchor"] == (1.02, 0.5)
+    assert captured["ncol"] == 2
+
+
+def test_save_categorical_umap_uses_visibility_tuned_scatter_defaults(
+    tmp_path: Path, monkeypatch
+):
+    config = _make_run_config()
+    adata = _make_output_adata()
+
+    captured: dict[str, object] = {}
+    original_scatter = matplotlib.axes.Axes.scatter
+
+    def capture_scatter(self, *args, **kwargs):
+        captured.update(
+            {
+                "s": kwargs.get("s"),
+                "alpha": kwargs.get("alpha"),
+                "linewidths": kwargs.get("linewidths"),
+            }
+        )
+        return original_scatter(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "scatter", capture_scatter)
+
+    output_path = tmp_path / "visibility_tuned.png"
+    save_categorical_umap(
+        adata,
+        color_key="cluster",
+        output_path=output_path,
+        title="Visibility tuning",
+        config=config,
+    )
+
+    assert output_path.exists()
+    assert captured["s"] > config.plotting.point_size
+    assert captured["alpha"] < 0.95
 
 
 def test_write_sample_outputs_emits_required_files_and_metadata_contract(
