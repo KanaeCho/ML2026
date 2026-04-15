@@ -648,3 +648,32 @@ def test_annotate_with_cima_constrains_l2_by_l1_hierarchy(tmp_path: Path):
 
     assert out.obs.loc["cell-1", "cima_l1"] == "L1_A"
     assert out.obs.loc["cell-1", "cima_l2"] == "L2_A1"
+
+
+def test_annotate_with_cima_prefers_gene_symbols_over_ensembl_feature_ids(
+    tmp_path: Path,
+):
+    _write_cima_reference_assets(tmp_path)
+    adata = ad.AnnData(
+        X=np.array(
+            [
+                [10.0, 0.0],
+                [0.0, 10.0],
+            ]
+        ),
+        obs=pd.DataFrame({"pass_qc": [True, True]}, index=["cell-1", "cell-2"]),
+        var=pd.DataFrame(
+            {
+                "feature_id": ["ENSG000001", "ENSG000002"],
+                "feature_name": ["GeneA", "GeneB"],
+            },
+            index=["GeneA", "GeneB"],
+        ),
+    )
+
+    out = annotate_with_cima(adata, tmp_path)
+
+    assert out.obs.loc["cell-1", "cima_l1"] == "L1_A"
+    assert out.obs.loc["cell-2", "cima_l1"] == "L1_B"
+    assert out.obs.loc["cell-1", "cima_l2"] == "L2_A1"
+    assert out.obs.loc["cell-2", "cima_l2"] == "L2_B1"

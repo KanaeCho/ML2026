@@ -93,10 +93,14 @@ def _initialize_annotation_columns(obs: pd.DataFrame) -> None:
         obs[column] = pd.Series(pd.NA, index=obs.index, dtype="boolean")
 
 
-def _feature_ids_from_var(adata: ad.AnnData) -> pd.Index:
+def _candidate_feature_keys(adata: ad.AnnData) -> list[pd.Index]:
+    candidates: list[pd.Index] = []
+    if "feature_name" in adata.var.columns:
+        candidates.append(pd.Index(adata.var["feature_name"].astype(str), dtype=str))
+    candidates.append(pd.Index(adata.var_names.astype(str), dtype=str))
     if "feature_id" in adata.var.columns:
-        return pd.Index(adata.var["feature_id"].astype(str), dtype=str)
-    return pd.Index(adata.var_names.astype(str), dtype=str)
+        candidates.append(pd.Index(adata.var["feature_id"].astype(str), dtype=str))
+    return candidates
 
 
 def _build_query_matrix(adata: ad.AnnData, reference: CimaReference) -> np.ndarray:
@@ -106,9 +110,12 @@ def _build_query_matrix(adata: ad.AnnData, reference: CimaReference) -> np.ndarr
         else np.asarray(adata.X, dtype=float)
     )
     query = np.zeros((adata.n_obs, len(reference.feature_ids)), dtype=float)
-    feature_lookup = pd.Series(
-        np.arange(adata.n_vars), index=_feature_ids_from_var(adata)
+    reference_ids = set(reference.feature_ids)
+    best_index = max(
+        _candidate_feature_keys(adata),
+        key=lambda idx: len(set(idx.astype(str)) & reference_ids),
     )
+    feature_lookup = pd.Series(np.arange(adata.n_vars), index=best_index)
     feature_lookup = feature_lookup[~feature_lookup.index.duplicated(keep="first")]
 
     matched_reference_positions = []
