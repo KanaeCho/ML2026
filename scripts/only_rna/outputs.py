@@ -9,7 +9,7 @@ from scipy import sparse
 from scipy.io import mmwrite
 
 from .models import RunConfig
-from .plotting import save_categorical_umap
+from .plotting import save_annotation_method_comparison_umap, save_categorical_umap
 
 
 UMAP_PLOTS = {
@@ -17,7 +17,17 @@ UMAP_PLOTS = {
     "cima_l1": ("umap_rna_cima_cell_type_l1.png", "CIMA L1"),
     "cima_l2": ("umap_rna_cima_cell_type_l2.png", "CIMA L2"),
     "cima_l1_masked": ("umap_rna_cima_cell_type_l1_masked.png", "CIMA L1 masked"),
+    # Optional alternative annotation overlays (if produced by updated annotation flow)
+    "azimuth": ("umap_rna_azimuth.png", "Azimuth"),
+    "celltypist": ("umap_rna_celltypist.png", "CellTypist"),
+    "singler": ("umap_rna_singler.png", "SingleR"),
+    "scanvi": ("umap_rna_scanvi.png", "scANVI"),
 }
+
+ANNOTATION_METHOD_COMPARISON_PLOT = (
+    "umap_rna_annotation_method_compare.png",
+    "Annotation method comparison",
+)
 
 
 def _sanitize_dataframe_for_h5ad(frame: pd.DataFrame) -> pd.DataFrame:
@@ -208,6 +218,23 @@ def write_sample_outputs(
                 config=config,
             )
         expected_paths[filename] = plot_path
+
+    comparison_filename, comparison_title = ANNOTATION_METHOD_COMPARISON_PLOT
+    comparison_path = output_dir / comparison_filename
+    comparison_columns = [
+        "azimuth_cell_type",
+        "celltypist_cell_type",
+        "singler_cell_type",
+        "scanvi_cell_type",
+    ]
+    if all(column in adata.obs.columns for column in comparison_columns):
+        save_annotation_method_comparison_umap(
+            adata,
+            output_path=comparison_path,
+            title=comparison_title,
+            config=config,
+        )
+    expected_paths[comparison_filename] = comparison_path
 
     _write_validation_result(
         validation_result_path,

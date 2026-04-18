@@ -12,7 +12,12 @@ from scipy import sparse
 
 from scripts.only_rna.models import PlottingConfig, QcThresholds, RunConfig
 from scripts.only_rna.outputs import write_sample_outputs
-from scripts.only_rna.plotting import save_categorical_umap
+from scripts.only_rna.plotting import (
+    build_cima_l1_palette,
+    build_cima_l2_palette,
+    get_hierarchical_palette,
+    save_categorical_umap,
+)
 
 
 def _make_run_config() -> RunConfig:
@@ -359,3 +364,161 @@ def test_write_sample_outputs_emits_required_files_and_metadata_contract(
         validation["check_name"] == "output_presence:umap_rna_cima_cell_type_l1.png",
         "passed",
     ].tolist() == [True]
+
+
+# ---------------------------------------------------------------------------
+# Hierarchical palette tests
+# ---------------------------------------------------------------------------
+
+_ALL_L1 = ["B", "CD4_T", "CD8_T", "ILC", "Myeloid", "unconvensional_T"]
+
+
+def _color_distance(hex_a: str, hex_b: str) -> float:
+    """Euclidean distance in RGB space between two hex colours."""
+    a = np.array([int(hex_a[i : i + 2], 16) for i in (1, 3, 5)], dtype=float)
+    b = np.array([int(hex_b[i : i + 2], 16) for i in (1, 3, 5)], dtype=float)
+    return float(np.linalg.norm(a - b))
+
+
+def test_l1_palette_returns_distinct_colors_for_separate_families():
+    pal = build_cima_l1_palette(_ALL_L1)
+    # B, ILC, Myeloid are from three different families — must be far apart
+    assert _color_distance(pal["B"], pal["ILC"]) > 50
+    assert _color_distance(pal["B"], pal["Myeloid"]) > 50
+    assert _color_distance(pal["ILC"], pal["Myeloid"]) > 50
+
+
+def test_l1_palette_cd4_cd8_share_family():
+    pal = build_cima_l1_palette(_ALL_L1)
+    # CD4_T and CD8_T must be different colours but from the same family
+    # "Same family" = they are closer to each other than to B/ILC/Myeloid
+    assert pal["CD4_T"] != pal["CD8_T"]
+    dist_within = _color_distance(pal["CD4_T"], pal["CD8_T"])
+    dist_cross = _color_distance(pal["CD4_T"], pal["B"])
+    assert dist_within < dist_cross
+
+
+def test_l1_palette_unconvensional_t_distinct_but_in_t_family():
+    pal = build_cima_l1_palette(_ALL_L1)
+    # unconvensional_T must be distinct from CD4_T / CD8_T
+    assert pal["unconvensional_T"] != pal["CD4_T"]
+    assert pal["unconvensional_T"] != pal["CD8_T"]
+    # But it must still be in the T-family: closer to CD4_T than B is
+    dist_unconv_cd4 = _color_distance(pal["unconvensional_T"], pal["CD4_T"])
+    dist_b_cd4 = _color_distance(pal["B"], pal["CD4_T"])
+    assert dist_unconv_cd4 < dist_b_cd4
+
+
+def test_l2_palette_inherits_parent_family_shade():
+    l2_by_l1 = {
+        "CD4_T": ["CD4_naive", "CD4_cm", "CD4_em"],
+        "CD8_T": ["CD8_naive", "CD8_CTL", "CD8_em"],
+        "B": ["Naive_B", "Memory_B", "Plasma"],
+        "ILC": ["ILC1", "ILC2", "ILC3"],
+        "Myeloid": ["Monocyte", "cDC", "pDC"],
+        "unconvensional_T": ["gd_T", "MAIT", "NKT"],
+    }
+    pal = build_cima_l2_palette(l2_by_l1)
+    l1_pal = build_cima_l1_palette(_ALL_L1)
+
+    # CD4_naive and CD8_CTL must be different (different families)
+    assert pal["CD4_naive"] != pal["CD8_CTL"]
+
+    # CD4_naive should be close to the CD4_T L1 base colour
+    dist_cd4 = _color_distance(pal["CD4_naive"], l1_pal["CD4_T"])
+    dist_cross = _color_distance(pal["CD4_naive"], l1_pal["B"])
+    assert dist_cd4 < dist_cross
+
+    # CD8_CTL should be close to the CD8_T L1 base colour
+    dist_cd8 = _color_distance(pal["CD8_CTL"], l1_pal["CD8_T"])
+    dist_cross2 = _color_distance(pal["CD8_CTL"], l1_pal["B"])
+    assert dist_cd8 < dist_cross2
+
+    # gd_T (child of unconvensional_T) should be closer to unconvensional_T
+    # than to B
+    dist_gd_unc = _color_distance(pal["gd_T"], l1_pal["unconvensional_T"])
+    dist_gd_b = _color_distance(pal["gd_T"], l1_pal["B"])
+    assert dist_gd_unc < dist_gd_b
+
+
+def test_get_hierarchical_palette_returns_tab20_for_cluster():
+    """cluster key should NOT use hierarchical palette."""
+    pal = get_hierarchical_palette("cluster", ["0", "1", "2"])
+    # Must be None to signal "use default tab20"
+    assert pal is None
+
+
+def test_get_hierarchical_palette_returns_dict_for_cima_keys():
+    for key in ("cima_l1", "cima_l2", "cima_l1_masked"):
+        labels = _ALL_L1 if key != "cima_l2" else ["CD4_naive", "CD8_CTL", "Naive_B"]
+        pal = get_hierarchical_palette(key, labels)
+        assert pal is not None
+        assert isinstance(pal, dict)
+        for label in labels:
+            assert label in pal, f"missing {label} in palette for {key}"
+
+
+def test_l2_palette_handles_more_unknown_parents_than_fallback_colors():
+    labels = [
+        "Total_Plasma",
+        "Memory_like",
+        "Naive_like",
+        "Plasma_like",
+        "Treg_like",
+        "Prolif_like",
+        "Eryth_like",
+        "Platelet_like",
+        "DC",
+        "HSPC",
+    ]
+
+    pal = get_hierarchical_palette("cima_l2", labels)
+
+    assert pal is not None
+    assert isinstance(pal, dict)
+    for label in labels:
+        assert label in pal, f"missing {label} in palette for cima_l2 overflow case"
+
+
+def test_save_categorical_umap_uses_hierarchical_palette_for_cima_l1(
+    tmp_path: Path, monkeypatch
+):
+    config = _make_run_config()
+    adata = ad.AnnData(
+        X=sparse.csr_matrix(np.eye(6)),
+        obs=pd.DataFrame(
+            {
+                "umap_1": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                "umap_2": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                "cima_l1": _ALL_L1,
+            },
+            index=[f"cell-{i}" for i in range(6)],
+        ),
+    )
+
+    l1_palette = build_cima_l1_palette(_ALL_L1)
+    captured_colors: dict[str, str] = {}
+    original_scatter = matplotlib.axes.Axes.scatter
+
+    def capture_scatter(self, *args, **kwargs):
+        c = kwargs.get("c")
+        label = kwargs.get("label")
+        if c and label:
+            captured_colors[label] = c[0] if isinstance(c, list) else c
+        return original_scatter(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "scatter", capture_scatter)
+
+    output_path = tmp_path / "hier_l1.png"
+    save_categorical_umap(
+        adata,
+        color_key="cima_l1",
+        output_path=output_path,
+        title="Hierarchical L1",
+        config=config,
+    )
+
+    assert output_path.exists()
+    # Every L1 label must have been plotted with its hierarchical colour
+    for label in _ALL_L1:
+        assert label in captured_colors, f"missing scatter for {label}"
