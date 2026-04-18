@@ -17,7 +17,7 @@ from scripts.only_rna.annotation import (
 )
 from scripts.only_rna.discovery import DiscoveredSample
 from scripts.only_rna.doublet import run_doublet_detection
-from scripts.only_rna.embedding import run_embedding
+from scripts.only_rna.embedding import run_embedding, _embedding_parameters
 from scripts.only_rna.models import RunConfig, QcThresholds, PlottingConfig
 from scripts.only_rna.qc import apply_qc_filters, compute_qc_metrics
 from scripts.only_rna.read_inputs import read_sample_input
@@ -496,6 +496,14 @@ def test_run_embedding_falls_back_when_leiden_dependency_missing(monkeypatch):
     )
     assert pd.isna(out.obs.loc["cell-4", "umap_1"])
     assert pd.isna(out.obs.loc["cell-4", "umap_2"])
+
+
+def test_embedding_parameters_use_pbmc_tuned_defaults_for_medium_samples():
+    params = _embedding_parameters(n_obs=1296, n_vars=33538)
+
+    assert params["n_top_genes"] == 1000
+    assert params["n_neighbors"] == 10
+    assert params["resolution"] == 0.5
 
 
 def _write_cima_reference_assets(

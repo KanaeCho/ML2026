@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
 
-from .annotation import annotate_with_cima
+from .annotation import annotate_with_all_versions
 from .config import load_default_config
 from .doublet import run_doublet_detection
 from .discovery import (
@@ -164,7 +164,15 @@ def _execute_rna_sample(sample: DiscoveredSample, args) -> bool:
     adata = run_doublet_detection(adata, config)
     adata = apply_qc_filters(adata, config)
     adata = run_embedding(adata, config)
-    adata = annotate_with_cima(adata, resolve_data_root(ROOT) / "reference")
+    adata = annotate_with_all_versions(
+        adata,
+        reference_dir=resolve_data_root(ROOT) / "reference",
+        azimuth_model_dir=None,
+        celltypist_model_path=None,
+        singler_model_path=None,
+        scanvi_model_path=None,
+        methods=["cima"],
+    )
     write_sample_outputs(
         adata,
         output_root=Path(getattr(args, "output_root", DEFAULT_OUTPUT_ROOT)),

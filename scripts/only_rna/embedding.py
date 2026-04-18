@@ -20,6 +20,21 @@ def _initialize_embedding_columns(obs: pd.DataFrame) -> None:
     obs["umap_2"] = pd.Series(np.nan, index=obs.index, dtype=float)
 
 
+def _embedding_parameters(n_obs: int, n_vars: int) -> dict[str, float | int]:
+    if n_obs >= 500:
+        return {
+            "n_top_genes": max(1, min(1000, n_vars)),
+            "n_neighbors": max(2, min(10, n_obs - 1)),
+            "resolution": 0.5,
+        }
+
+    return {
+        "n_top_genes": max(1, min(2000, n_vars)),
+        "n_neighbors": max(2, min(15, n_obs - 1)),
+        "resolution": 1.0,
+    }
+
+
 def _run_scanpy_embedding(pass_qc_adata: ad.AnnData, config: RunConfig) -> ad.AnnData:
     del config
 
@@ -35,7 +50,8 @@ def _run_scanpy_embedding(pass_qc_adata: ad.AnnData, config: RunConfig) -> ad.An
     sc.pp.normalize_total(out, target_sum=1e4)
     sc.pp.log1p(out)
 
-    n_top_genes = max(1, min(2000, out.n_vars))
+    params = _embedding_parameters(out.n_obs, out.n_vars)
+    n_top_genes = int(params["n_top_genes"])
     sc.pp.highly_variable_genes(
         out,
         n_top_genes=n_top_genes,
@@ -47,12 +63,14 @@ def _run_scanpy_embedding(pass_qc_adata: ad.AnnData, config: RunConfig) -> ad.An
     sc.pp.scale(out, max_value=10)
     sc.tl.pca(out, n_comps=n_comps)
 
-    n_neighbors = max(1, min(15, out.n_obs - 1))
+    n_neighbors = int(params["n_neighbors"])
     sc.pp.neighbors(out, n_neighbors=n_neighbors, n_pcs=n_comps)
 
     if out.n_obs >= 3:
         try:
-            sc.tl.leiden(out, key_added="cluster")
+            sc.tl.leiden(
+                out, key_added="cluster", resolution=float(params["resolution"])
+            )
         except ImportError:
             out.obs["cluster"] = pd.Series(
                 ["0"] * out.n_obs, index=out.obs_names, dtype="string"
@@ -105,4 +123,4 @@ def run_embedding(adata: ad.AnnData, config: RunConfig) -> ad.AnnData:
     return out
 
 
-__all__ = ["run_embedding"]
+__all__ = ["run_embedding", "_embedding_parameters"]
