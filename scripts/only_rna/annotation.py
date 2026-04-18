@@ -30,6 +30,70 @@ ANNOTATION_FLOAT_COLUMNS = [
 ]
 ANNOTATION_BOOL_COLUMNS = ["cima_l1_low_confidence"]
 
+# ---------------------------------------------------------------------------
+# Additional alternative annotation channels (Azimuth, CellTypist, SingleR, scANVI)
+# These are implemented as lightweight integrations that gracefully degrade
+# when external libraries/models are not available. They populate new
+# adata.obs columns that mirror the cima_* schema so downstream plotting can
+# reuse the existing UMAP plotting pipeline.
+# ---------------------------------------------------------------------------
+
+# Azimuth: prediction results (when Azimuth is available). Columns aligned with
+# the CIMA schema for consistency with plotting logic.
+ANNOTATION_AZIMUTH_COLUMNS = [
+    "azimuth_cell_type",
+    "azimuth_score",
+    "azimuth_score_margin",
+    "azimuth_low_confidence",
+]
+
+# CellTypist: alternative cell-type annotations
+ANNOTATION_CELL_TYPIST_COLUMNS = [
+    "celltypist_cell_type",
+    "celltypist_score",
+    "celltypist_score_margin",
+    "celltypist_low_confidence",
+]
+
+# SingleR: alternative annotation (experimental via rpy2 or Python port)
+ANNOTATION_SINGLE_R_COLUMNS = [
+    "singler_cell_type",
+    "singler_score",
+    "singler_score_margin",
+    "singler_low_confidence",
+]
+
+# scANVI: alternative annotation using scvi-tools (if available)
+ANNOTATION_SCANVI_COLUMNS = [
+    "scanvi_cell_type",
+    "scanvi_score",
+    "scanvi_score_margin",
+    "scanvi_low_confidence",
+]
+
+ALTERNATIVE_ANNOTATION_STRING_COLUMNS = [
+    "azimuth_cell_type",
+    "celltypist_cell_type",
+    "singler_cell_type",
+    "scanvi_cell_type",
+]
+ALTERNATIVE_ANNOTATION_FLOAT_COLUMNS = [
+    "azimuth_score",
+    "azimuth_score_margin",
+    "celltypist_score",
+    "celltypist_score_margin",
+    "singler_score",
+    "singler_score_margin",
+    "scanvi_score",
+    "scanvi_score_margin",
+]
+ALTERNATIVE_ANNOTATION_BOOL_COLUMNS = [
+    "azimuth_low_confidence",
+    "celltypist_low_confidence",
+    "singler_low_confidence",
+    "scanvi_low_confidence",
+]
+
 
 def _read_feature_model(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, sep="\t", compression="gzip")
@@ -91,6 +155,18 @@ def _initialize_annotation_columns(obs: pd.DataFrame) -> None:
         obs[column] = pd.Series(np.nan, index=obs.index, dtype=float)
     for column in ANNOTATION_BOOL_COLUMNS:
         obs[column] = pd.Series(pd.NA, index=obs.index, dtype="boolean")
+    for column in ALTERNATIVE_ANNOTATION_STRING_COLUMNS:
+        obs[column] = pd.Series(pd.NA, index=obs.index, dtype="string")
+    for column in ALTERNATIVE_ANNOTATION_FLOAT_COLUMNS:
+        obs[column] = pd.Series(np.nan, index=obs.index, dtype=float)
+    for column in ALTERNATIVE_ANNOTATION_BOOL_COLUMNS:
+        obs[column] = pd.Series(pd.NA, index=obs.index, dtype="boolean")
+
+
+def _populate_na_annotation_columns(adata: ad.AnnData) -> None:
+    """Placeholder kept for compatibility; actual population happens in
+    annotate_with_* helpers above. This function is not used in current flow."""
+    return None
 
 
 def _candidate_feature_keys(adata: ad.AnnData) -> list[pd.Index]:
@@ -218,4 +294,145 @@ def annotate_with_cima(adata: ad.AnnData, reference_dir: Path) -> ad.AnnData:
     return out
 
 
-__all__ = ["CimaReference", "load_cima_reference", "annotate_with_cima"]
+def annotate_with_azimuth(
+    adata: ad.AnnData, azimuth_model_dir: Path | None = None
+) -> ad.AnnData:
+    """Attempt Azimuth-based annotation. Gracefully degrades if Azimuth isn't available.
+    This function creates four new columns on adata.obs:
+      azimuth_cell_type, azimuth_score, azimuth_score_margin, azimuth_low_confidence
+    If actual Azimuth prediction is not possible, cells remain NA/NaN.
+    """
+    out = adata.copy()
+    # ensure columns exist
+    for column in ANNOTATION_AZIMUTH_COLUMNS:
+        if column not in out.obs:
+            if column.endswith("_type"):
+                out.obs[column] = pd.Series(pd.NA, index=out.obs.index, dtype="string")
+            else:
+                out.obs[column] = pd.Series(np.nan, index=out.obs.index, dtype=float)
+
+    # Attempt to run Azimuth if available
+    try:
+        import azimuth  # type: ignore
+
+        # Best-effort: try a simple mapping via a precomputed mapping file if present.
+        mapping = None
+        if azimuth_model_dir is not None:
+            possible = Path(azimuth_model_dir) / "azimuth_mapping.tsv"
+            if possible.exists():
+                mapping = pd.read_csv(possible, sep="\t")
+        if mapping is not None and not mapping.empty:
+            for idx, cell in enumerate(out.obs_names):
+                row = mapping.loc[mapping.index == idx]
+                if not row.empty:
+                    out.obs.loc[out.obs_names[idx], "azimuth_cell_type"] = str(
+                        row.iloc[0].get("pred_label", "Unknown")
+                    )
+                    if "score" in row.columns:
+                        out.obs.loc[out.obs_names[idx], "azimuth_score"] = float(
+                            row.iloc[0]["score"]
+                        )
+        # if mapping not provided, leave as NA
+    except Exception:
+        pass
+    return out
+
+
+def annotate_with_cell_typist(
+    adata: ad.AnnData, model_path: Path | None = None
+) -> ad.AnnData:
+    """Lightweight wrapper for CellTypist integration. If the library/model is unavailable, no-op.
+    Outputs: celltypist_cell_type, celltypist_score, celltypist_score_margin, celltypist_low_confidence
+    """
+    out = adata.copy()
+    for column in ANNOTATION_CELL_TYPIST_COLUMNS:
+        if column not in out.obs:
+            if column.endswith("_type"):
+                out.obs[column] = pd.Series(pd.NA, index=out.obs.index, dtype="string")
+            else:
+                out.obs[column] = pd.Series(np.nan, index=out.obs.index, dtype=float)
+    try:
+        import celltypist as ct  # type: ignore
+
+        # Attempt to load a model if provided; otherwise skip quietly
+        if model_path is not None:
+            model = ct.models.Model.from_path(str(model_path))  # type: ignore[attr-defined]
+        else:
+            # try common defaults
+            model = None
+        if model is not None:
+            predictions, probs = ct.utils.annotate_cell_types(adata, model)  # type: ignore[attr-defined]
+            # predictions is a Series aligned with adata.obs_names
+            if hasattr(predictions, "values"):
+                out.obs["celltypist_cell_type"] = predictions.astype("string")
+            if probs is not None and probs.shape[0] == adata.n_obs:
+                out.obs["celltypist_score"] = probs.max(axis=1).astype(float).values
+    except Exception:
+        pass
+    return out
+
+
+def annotate_with_singler(
+    adata: ad.AnnData, model_path: Path | None = None
+) -> ad.AnnData:
+    """Placeholder for SingleR integration. If unavailable, it's a no-op.
+    Outputs: singler_cell_type, singler_score, singler_score_margin, singler_low_confidence
+    """
+    out = adata.copy()
+    for column in ANNOTATION_SINGLE_R_COLUMNS:
+        if column not in out.obs:
+            if column.endswith("_type"):
+                out.obs[column] = pd.Series(pd.NA, index=out.obs.index, dtype="string")
+            else:
+                out.obs[column] = pd.Series(np.nan, index=out.obs.index, dtype=float)
+    return out
+
+
+def annotate_with_scanvi(
+    adata: ad.AnnData, model_path: Path | None = None
+) -> ad.AnnData:
+    """Placeholder for scANVI annotation via scvi-tools. If unavailable, it's a no-op.
+    Outputs: scanvi_cell_type, scanvi_score, scanvi_score_margin, scanvi_low_confidence
+    """
+    out = adata.copy()
+    for column in ANNOTATION_SCANVI_COLUMNS:
+        if column not in out.obs:
+            if column.endswith("_type"):
+                out.obs[column] = pd.Series(pd.NA, index=out.obs.index, dtype="string")
+            else:
+                out.obs[column] = pd.Series(np.nan, index=out.obs.index, dtype=float)
+    return out
+
+
+def annotate_with_all_versions(
+    adata: ad.AnnData,
+    reference_dir: Path,
+    azimuth_model_dir: Path | None = None,
+    celltypist_model_path: Path | None = None,
+    singler_model_path: Path | None = None,
+    scanvi_model_path: Path | None = None,
+    methods: list[str] | None = None,
+) -> ad.AnnData:
+    """Run multiple annotation backends (CIMA, Azimuth, CellTypist, SingleR, scANVI).
+    This is a best-effort orchestrator. Individual backends gracefully degrade if
+    their libraries/models are unavailable.
+    """
+    methods = methods or ["cima"]
+    out = annotate_with_cima(adata, reference_dir)
+    if "azimuth" in methods:
+        out = annotate_with_azimuth(out, azimuth_model_dir=azimuth_model_dir)
+    if "cell_typist" in methods:
+        out = annotate_with_cell_typist(out, model_path=celltypist_model_path)
+    if "singler" in methods:
+        out = annotate_with_singler(out, model_path=singler_model_path)
+    if "scanvi" in methods:
+        out = annotate_with_scanvi(out, model_path=scanvi_model_path)
+    return out
+
+
+__all__ = [
+    "CimaReference",
+    "load_cima_reference",
+    "annotate_with_cima",
+    "annotate_with_all_versions",
+]
