@@ -10,3 +10,6 @@ plotting:
   point_size: 3.0
   legend_fontsize: 10.0
   legend_title_fontsize: 11.0
+annotation:
+  methods:
+    - cima

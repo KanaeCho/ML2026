@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import List
+
+
+@dataclass(frozen=True)
+class AnnotationConfig:
+    # List of annotation backends to run. E.g. ["cima", "azimuth", "cell_typist"]
+    methods: List[str]
 
 
 @dataclass(frozen=True)
@@ -27,3 +34,4 @@ class PlottingConfig:
 class RunConfig:
     qc: QcThresholds
     plotting: PlottingConfig
+    annotation: AnnotationConfig | None = None

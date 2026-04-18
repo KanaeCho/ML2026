@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import yaml
 
-from .models import RunConfig, QcThresholds, PlottingConfig
+from .models import RunConfig, QcThresholds, PlottingConfig, AnnotationConfig
 
 
 def load_default_config(path: Path) -> RunConfig:
@@ -34,7 +34,12 @@ def load_default_config(path: Path) -> RunConfig:
         legend_title_fontsize=float(plot_map.get("legend_title_fontsize", 0.0)),
     )
 
-    return RunConfig(qc=qc, plotting=plotting)
+    anno_map = data.get("annotation", {}) or {}
+    annotation_cfg = None
+    if isinstance(anno_map, dict):
+        annotation_cfg = AnnotationConfig(methods=list(anno_map.get("methods", [])))
+
+    return RunConfig(qc=qc, plotting=plotting, annotation=annotation_cfg)
 
 
 def merge_cli_overrides(base: RunConfig, **overrides) -> RunConfig:
@@ -60,6 +65,7 @@ def merge_cli_overrides(base: RunConfig, **overrides) -> RunConfig:
         "legend_fontsize": base.plotting.legend_fontsize,
         "legend_title_fontsize": base.plotting.legend_title_fontsize,
     }
+    annotation = base.annotation
 
     for key, value in overrides.items():
         # Support plan-aligned simple top-level overrides first
@@ -102,4 +108,4 @@ def merge_cli_overrides(base: RunConfig, **overrides) -> RunConfig:
         legend_title_fontsize=float(plotting["legend_title_fontsize"]),
     )
 
-    return RunConfig(qc=new_qc, plotting=new_plotting)
+    return RunConfig(qc=new_qc, plotting=new_plotting, annotation=annotation)
