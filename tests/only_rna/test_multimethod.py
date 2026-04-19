@@ -8,7 +8,9 @@ import pandas as pd
 from scipy import sparse
 
 from scripts.only_rna.annotation import annotate_with_all_versions
+from scripts.only_rna.azimuth import AzimuthAnnotationResult
 from scripts.only_rna.models import (
+    AzimuthConfig,
     AnnotationConfig,
     PlottingConfig,
     QcThresholds,
@@ -156,6 +158,84 @@ def test_annotate_with_all_versions_initializes_expected_method_columns(tmp_path
     assert out.obs.loc["cell-1", "cima_l1"] == "L1_A"
     assert pd.isna(out.obs.loc["cell-2", "azimuth_cell_type"])
     assert pd.isna(out.obs.loc["cell-2", "scanvi_low_confidence"])
+
+
+def test_annotate_with_all_versions_uses_shared_azimuth_result_and_records_status(
+    tmp_path: Path, monkeypatch
+):
+    reference_dir = _write_cima_reference_assets(tmp_path)
+    adata = _make_annotation_adata()
+
+    def _fake_run_azimuth_annotation(
+        _adata,
+        *,
+        config: AzimuthConfig,
+        annotation_level: str = "l1",
+        max_cells: int | None = None,
+    ) -> AzimuthAnnotationResult:
+        assert config.enabled is True
+        assert annotation_level == "l1"
+        assert max_cells is None
+        return AzimuthAnnotationResult(
+            labels=pd.Series(
+                ["CD4 T", "B"], index=["cell-1", "cell-3"], dtype="string"
+            ),
+            status="ok",
+            detail="pbmcref",
+        )
+
+    monkeypatch.setattr(
+        "scripts.only_rna.annotation.run_azimuth_annotation",
+        _fake_run_azimuth_annotation,
+    )
+
+    out = annotate_with_all_versions(
+        adata,
+        reference_dir=reference_dir,
+        methods=["cima", "azimuth"],
+        azimuth_config=AzimuthConfig(enabled=True),
+    )
+
+    assert out.obs.loc["cell-1", "azimuth_cell_type"] == "CD4 T"
+    assert out.obs.loc["cell-3", "azimuth_cell_type"] == "B"
+    assert pd.isna(out.obs.loc["cell-2", "azimuth_cell_type"])
+    assert out.uns["annotation_method_status"]["azimuth"] == {
+        "status": "ok",
+        "detail": "pbmcref",
+    }
+
+
+def test_annotate_with_all_versions_keeps_na_azimuth_labels_and_records_error_status(
+    tmp_path: Path, monkeypatch
+):
+    reference_dir = _write_cima_reference_assets(tmp_path)
+    adata = _make_annotation_adata()
+
+    monkeypatch.setattr(
+        "scripts.only_rna.annotation.run_azimuth_annotation",
+        lambda *_args, **_kwargs: AzimuthAnnotationResult(
+            labels=None,
+            status="error",
+            detail="Azimuth crashed",
+        ),
+    )
+
+    out = annotate_with_all_versions(
+        adata,
+        reference_dir=reference_dir,
+        methods=["cima", "azimuth"],
+        azimuth_config=AzimuthConfig(enabled=True),
+    )
+
+    assert pd.isna(out.obs.loc["cell-1", "azimuth_cell_type"])
+    assert pd.isna(out.obs.loc["cell-3", "azimuth_cell_type"])
+    assert pd.isna(out.obs.loc["cell-1", "azimuth_score"])
+    assert pd.isna(out.obs.loc["cell-3", "azimuth_score_margin"])
+    assert pd.isna(out.obs.loc["cell-1", "azimuth_low_confidence"])
+    assert out.uns["annotation_method_status"]["azimuth"] == {
+        "status": "error",
+        "detail": "Azimuth crashed",
+    }
 
 
 def test_write_sample_outputs_emits_four_method_comparison_umap(tmp_path: Path):
