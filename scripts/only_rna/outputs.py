@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 from pathlib import Path
 
 import anndata as ad
@@ -76,7 +77,10 @@ def _write_qc_summary(
     sample_id: str,
     n_cells_total: int,
     n_cells_pass_qc: int,
+    cima_l1_low_confidence_fraction: float,
+    annotation_method_status: dict[str, dict[str, str]],
 ) -> None:
+    azimuth_status = annotation_method_status.get("azimuth", {})
     pd.DataFrame(
         [
             {
@@ -85,6 +89,16 @@ def _write_qc_summary(
                 "n_cells_total": n_cells_total,
                 "n_cells_pass_qc": n_cells_pass_qc,
                 "n_cells_fail_qc": n_cells_total - n_cells_pass_qc,
+                "pass_qc_fraction": (
+                    float(n_cells_pass_qc) / float(n_cells_total)
+                    if n_cells_total > 0
+                    else 0.0
+                ),
+                "cima_l1_low_confidence_fraction": float(
+                    cima_l1_low_confidence_fraction
+                ),
+                "azimuth_status": azimuth_status.get("status", ""),
+                "azimuth_detail": azimuth_status.get("detail", ""),
             }
         ]
     ).to_csv(output_path, index=False)
@@ -132,6 +146,7 @@ def _write_validation_result(
     expected_paths: dict[str, Path],
     n_cells_total: int,
     n_cells_pass_qc: int,
+    annotation_method_status: dict[str, dict[str, str]],
 ) -> None:
     rows = [
         {
@@ -158,7 +173,94 @@ def _write_validation_result(
         }
         for name, path in expected_paths.items()
     )
+    rows.extend(
+        {
+            "check_name": f"annotation_status:{method}",
+            "passed": status.get("status") == "ok",
+            "detail": status.get("detail", ""),
+        }
+        for method, status in annotation_method_status.items()
+    )
     pd.DataFrame(rows).to_csv(output_path, index=False)
+
+
+def write_tuning_selection_artifacts(
+    *,
+    output_dir: Path,
+    sample_id: str,
+    gse: str,
+    candidate_specs: list[object],
+    evaluations: list[object],
+    best_candidate_id: str,
+) -> Path:
+    tuning_dir = Path(output_dir) / "tuning"
+    tuning_dir.mkdir(parents=True, exist_ok=True)
+
+    spec_by_id = {
+        getattr(candidate, "candidate_id"): candidate for candidate in candidate_specs
+    }
+    candidate_rows = []
+    for evaluation in evaluations:
+        candidate = spec_by_id.get(getattr(evaluation, "candidate_id"))
+        candidate_rows.append(
+            {
+                "sample_id": sample_id,
+                "gse": gse,
+                "candidate_id": getattr(evaluation, "candidate_id"),
+                "qc_preset_id": getattr(candidate, "qc_preset_id", ""),
+                "azimuth_preset_id": getattr(candidate, "azimuth_preset_id", ""),
+                "embedding_preset_id": getattr(candidate, "embedding_preset_id", ""),
+                "total_score": float(getattr(evaluation, "total_score", 0.0)),
+                "reason_code": getattr(evaluation, "reason_code", ""),
+            }
+        )
+
+    candidates_path = tuning_dir / "candidates.csv"
+    pd.DataFrame(candidate_rows).to_csv(candidates_path, index=False)
+
+    if not best_candidate_id:
+        return tuning_dir
+
+    best_row = next(
+        row for row in candidate_rows if row["candidate_id"] == best_candidate_id
+    )
+
+    selection_summary_path = tuning_dir / "selection_summary.json"
+    selection_summary_path.write_text(
+        json.dumps(
+            {
+                "sample_id": sample_id,
+                "gse": gse,
+                "best_candidate_id": best_candidate_id,
+                "best_total_score": best_row["total_score"],
+                "reason_code": best_row["reason_code"],
+                "n_candidates": len(candidate_rows),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    selected_params_path = tuning_dir / "selected_params.json"
+    selected_params_path.write_text(
+        json.dumps(
+            {
+                "sample_id": sample_id,
+                "gse": gse,
+                "candidate_id": best_candidate_id,
+                "qc_preset_id": best_row["qc_preset_id"],
+                "azimuth_preset_id": best_row["azimuth_preset_id"],
+                "embedding_preset_id": best_row["embedding_preset_id"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return tuning_dir
 
 
 def write_sample_outputs(
@@ -174,6 +276,19 @@ def write_sample_outputs(
     metadata = _metadata_frame(adata)
     pass_qc_mask = _bool_pass_qc(adata.obs)
     metadata_qc = metadata.loc[pass_qc_mask.to_numpy()].reset_index(drop=True)
+    annotation_method_status = dict(adata.uns.get("annotation_method_status", {}))
+
+    if "cima_l1_low_confidence" in adata.obs.columns:
+        low_conf_mask = (
+            adata.obs.loc[pass_qc_mask, "cima_l1_low_confidence"]
+            .fillna(False)
+            .astype(bool)
+        )
+        cima_l1_low_confidence_fraction = (
+            float(low_conf_mask.mean()) if len(low_conf_mask) > 0 else 0.0
+        )
+    else:
+        cima_l1_low_confidence_fraction = 0.0
 
     metadata_path = output_dir / "metadata.csv"
     metadata_qc_path = output_dir / "metadata_qc.csv"
@@ -190,6 +305,8 @@ def write_sample_outputs(
         sample_id=sample_id,
         n_cells_total=adata.n_obs,
         n_cells_pass_qc=int(pass_qc_mask.sum()),
+        cima_l1_low_confidence_fraction=cima_l1_low_confidence_fraction,
+        annotation_method_status=annotation_method_status,
     )
     _prepare_h5ad_adata(adata).write_h5ad(
         h5ad_path, convert_strings_to_categoricals=False
@@ -241,8 +358,9 @@ def write_sample_outputs(
         expected_paths=expected_paths,
         n_cells_total=adata.n_obs,
         n_cells_pass_qc=int(pass_qc_mask.sum()),
+        annotation_method_status=annotation_method_status,
     )
     return output_dir
 
 
-__all__ = ["write_sample_outputs"]
+__all__ = ["write_sample_outputs", "write_tuning_selection_artifacts"]

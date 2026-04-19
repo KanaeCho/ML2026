@@ -8,6 +8,7 @@ import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pytest
 from scipy import sparse
 
 from scripts.only_rna.models import PlottingConfig, QcThresholds, RunConfig
@@ -89,7 +90,8 @@ def test_save_categorical_umap_creates_png_with_config_dimensions(tmp_path: Path
 
     assert output_path.exists()
     image = mpimg.imread(output_path)
-    assert image.shape[1] == int(config.plotting.umap_width * config.plotting.dpi)
+    expected_width = int((config.plotting.umap_width + 1.5) * config.plotting.dpi)
+    assert image.shape[1] == expected_width
     assert image.shape[0] == int(config.plotting.umap_height * config.plotting.dpi)
 
 
@@ -345,15 +347,16 @@ def test_write_sample_outputs_emits_required_files_and_metadata_contract(
     assert metadata_qc["cell_id"].tolist() == ["cell-1", "cell-3"]
     assert metadata_qc["pass_qc"].tolist() == [True, True]
 
-    assert qc_summary.to_dict(orient="records") == [
-        {
-            "sample_id": "GSM123456",
-            "gse": "GSE123456",
-            "n_cells_total": 3,
-            "n_cells_pass_qc": 2,
-            "n_cells_fail_qc": 1,
-        }
-    ]
+    assert qc_summary.shape == (1, 9)
+    assert qc_summary.loc[0, "sample_id"] == "GSM123456"
+    assert qc_summary.loc[0, "gse"] == "GSE123456"
+    assert qc_summary.loc[0, "n_cells_total"] == 3
+    assert qc_summary.loc[0, "n_cells_pass_qc"] == 2
+    assert qc_summary.loc[0, "n_cells_fail_qc"] == 1
+    assert qc_summary.loc[0, "pass_qc_fraction"] == pytest.approx(2 / 3)
+    assert qc_summary.loc[0, "cima_l1_low_confidence_fraction"] == pytest.approx(0.0)
+    assert pd.isna(qc_summary.loc[0, "azimuth_status"])
+    assert pd.isna(qc_summary.loc[0, "azimuth_detail"])
 
     completion = validation.loc[validation["check_name"] == "completion"]
     assert completion["passed"].tolist() == [True]
@@ -364,6 +367,47 @@ def test_write_sample_outputs_emits_required_files_and_metadata_contract(
         validation["check_name"] == "output_presence:umap_rna_cima_cell_type_l1.png",
         "passed",
     ].tolist() == [True]
+
+
+def test_write_sample_outputs_records_annotation_status_and_low_confidence_metrics(
+    tmp_path: Path,
+):
+    config = _make_run_config()
+    adata = _make_output_adata()
+    adata.obs["cima_l1_low_confidence"] = pd.Series(
+        [False, pd.NA, True],
+        index=adata.obs_names,
+        dtype="boolean",
+    )
+    adata.uns["annotation_method_status"] = {
+        "azimuth": {
+            "status": "error",
+            "detail": "Azimuth unavailable",
+        }
+    }
+
+    sample_dir = write_sample_outputs(
+        adata,
+        output_root=tmp_path,
+        gse="GSE654321",
+        sample_id="GSM654321",
+        config=config,
+    )
+
+    qc_summary = pd.read_csv(sample_dir / "qc_summary.csv")
+    validation = pd.read_csv(sample_dir / "validation_result.csv")
+
+    assert qc_summary.loc[0, "pass_qc_fraction"] == pytest.approx(2 / 3)
+    assert qc_summary.loc[0, "cima_l1_low_confidence_fraction"] == pytest.approx(0.5)
+    assert qc_summary.loc[0, "azimuth_status"] == "error"
+    assert qc_summary.loc[0, "azimuth_detail"] == "Azimuth unavailable"
+
+    assert validation.loc[
+        validation["check_name"] == "annotation_status:azimuth", "passed"
+    ].tolist() == [False]
+    assert validation.loc[
+        validation["check_name"] == "annotation_status:azimuth", "detail"
+    ].tolist() == ["Azimuth unavailable"]
 
 
 # ---------------------------------------------------------------------------
