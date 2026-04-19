@@ -19,6 +19,7 @@ from .embedding import run_embedding
 from .outputs import write_sample_outputs
 from .qc import apply_qc_filters, compute_qc_metrics
 from .read_inputs import read_sample_input
+from .tuning_orchestrator import run_bounded_tuning
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -157,6 +158,26 @@ def _build_placeholder_command(sample: DiscoveredSample, args) -> list[str]:
     ]
 
 
+def _build_tuning_command(sample: DiscoveredSample, args) -> list[str]:
+    python_bin = getattr(args, "python_bin", None) or sys.executable or "python3"
+    command = [
+        python_bin,
+        str(ROOT / "scripts" / "process" / "pipeline.py"),
+        "tune-rna-sample",
+        "--gse",
+        sample.gse,
+        "--sample-id",
+        sample.sample_id,
+        "--output-root",
+        str(Path(getattr(args, "output_root", DEFAULT_OUTPUT_ROOT))),
+    ]
+    if bool(getattr(args, "force", False)):
+        command.append("--force")
+    if bool(getattr(args, "dry_run", False)):
+        command.append("--dry-run")
+    return command
+
+
 def _execute_rna_sample(sample: DiscoveredSample, args) -> bool:
     config = load_default_config(DEFAULT_CONFIG_PATH)
     adata = read_sample_input(sample)
@@ -178,6 +199,20 @@ def _execute_rna_sample(sample: DiscoveredSample, args) -> bool:
         output_root=Path(getattr(args, "output_root", DEFAULT_OUTPUT_ROOT)),
         gse=sample.gse,
         sample_id=sample.sample_id,
+        config=config,
+    )
+    return True
+
+
+def _execute_tune_rna_sample(sample: DiscoveredSample, args) -> bool:
+    config = load_default_config(DEFAULT_CONFIG_PATH)
+    run_bounded_tuning(
+        sample_id=sample.sample_id,
+        gse=sample.gse,
+        input_sample=sample,
+        output_dir=_sample_output_dir(
+            sample, Path(getattr(args, "output_root", DEFAULT_OUTPUT_ROOT))
+        ),
         config=config,
     )
     return True
@@ -241,6 +276,65 @@ def _route_rna_sample(sample: DiscoveredSample, args) -> int:
     return 0
 
 
+def _route_tune_rna_sample(sample: DiscoveredSample, args) -> int:
+    output_root = Path(getattr(args, "output_root", DEFAULT_OUTPUT_ROOT))
+    force = bool(getattr(args, "force", False))
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    if not sample.supported:
+        print(
+            f"[skip-tune-rna] {sample.gse}/{sample.sample_id} unsupported: {sample.note}",
+            file=sys.stderr,
+        )
+        return 2
+
+    command = _build_tuning_command(sample, args)
+    started_at = utc_now()
+    status_payload = {
+        "sample": {"gse": sample.gse, "sample_id": sample.sample_id},
+        "input_type": sample.input_type,
+        "sample_kind": sample.sample_kind,
+        "command": command,
+        "output_root": str(output_root),
+        "started_at": started_at,
+        "status": "dry_run" if dry_run else "running",
+        "outputs_complete": _outputs_complete(sample, output_root),
+        "note": "Stable RNA CLI routing and bounded tuning execution.",
+        "mode": "tuning",
+    }
+
+    print(f"[tune-rna] {sample.gse}/{sample.sample_id}")
+    print(" ".join(command))
+    if dry_run:
+        status_payload["finished_at"] = started_at
+        status_payload["status"] = "dry_run"
+        _write_rna_status(sample, status_payload, output_root)
+        return 0
+
+    if _outputs_complete(sample, output_root) and not force:
+        print(
+            f"[skip-tune-rna] {sample.gse}/{sample.sample_id} already has complete RNA outputs"
+        )
+        return 0
+
+    _write_rna_status(sample, status_payload, output_root)
+    try:
+        _execute_tune_rna_sample(sample, args)
+    except Exception as exc:
+        status_payload["finished_at"] = utc_now()
+        status_payload["status"] = "failed"
+        status_payload["outputs_complete"] = _outputs_complete(sample, output_root)
+        status_payload["note"] = str(exc)
+        _write_rna_status(sample, status_payload, output_root)
+        raise
+
+    status_payload["finished_at"] = utc_now()
+    status_payload["status"] = "success"
+    status_payload["outputs_complete"] = True
+    _write_rna_status(sample, status_payload, output_root)
+    return 0
+
+
 def cmd_discover_rna(args) -> int:
     _print_rna_discovery(_discover_selected_rna_samples(gse=getattr(args, "gse", None)))
     return 0
@@ -271,6 +365,31 @@ def cmd_run_rna_gse(args) -> int:
     return returncode
 
 
+def cmd_tune_rna_sample(args) -> int:
+    sample = find_rna_sample(args.gse, args.sample_id)
+    if sample.sample_kind == "gse_shared" or sample.sample_id == sample.gse:
+        print(
+            f"Refusing explicit tune-rna-sample target for gse-level shared sample: {sample.gse}/{sample.sample_id}",
+            file=sys.stderr,
+        )
+        return 2
+    return _route_tune_rna_sample(sample, args)
+
+
+def cmd_tune_rna_gse(args) -> int:
+    samples = [
+        sample
+        for sample in _discover_selected_rna_samples(gse=args.gse)
+        if sample.supported
+    ]
+    returncode = 0
+    for sample in samples:
+        current = _route_tune_rna_sample(sample, args)
+        if current != 0:
+            returncode = current
+    return returncode
+
+
 def cmd_rna_status(args) -> int:
     _print_rna_status(
         _discover_selected_rna_samples(gse=getattr(args, "gse", None)),
@@ -283,5 +402,7 @@ __all__ = [
     "cmd_discover_rna",
     "cmd_run_rna_sample",
     "cmd_run_rna_gse",
+    "cmd_tune_rna_sample",
+    "cmd_tune_rna_gse",
     "cmd_rna_status",
 ]

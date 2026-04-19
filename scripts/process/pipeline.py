@@ -795,6 +795,34 @@ def build_parser() -> argparse.ArgumentParser:
     run_rna_gse_parser.add_argument("--force", action="store_true")
     run_rna_gse_parser.add_argument("--dry-run", action="store_true")
 
+    tune_rna_sample_parser = subparsers.add_parser(
+        "tune-rna-sample", help="Run bounded tuning for one RNA sample"
+    )
+    tune_rna_sample_parser.add_argument("--gse", required=True)
+    tune_rna_sample_parser.add_argument("--sample-id", required=True)
+    tune_rna_sample_parser.add_argument(
+        "--python-bin", default=sys.executable or "python3"
+    )
+    tune_rna_sample_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "rna")
+    )
+    tune_rna_sample_parser.add_argument("--force", action="store_true")
+    tune_rna_sample_parser.add_argument("--dry-run", action="store_true")
+
+    tune_rna_gse_parser = subparsers.add_parser(
+        "tune-rna-gse",
+        help="Run bounded tuning for all supported RNA samples under one GSE",
+    )
+    tune_rna_gse_parser.add_argument("--gse", required=True)
+    tune_rna_gse_parser.add_argument(
+        "--python-bin", default=sys.executable or "python3"
+    )
+    tune_rna_gse_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "rna")
+    )
+    tune_rna_gse_parser.add_argument("--force", action="store_true")
+    tune_rna_gse_parser.add_argument("--dry-run", action="store_true")
+
     download_parser = subparsers.add_parser(
         "download", help="Download GEO files based on datasets.xlsx filtering"
     )
@@ -905,6 +933,12 @@ def main() -> int:
 
     if args.command == "run-rna-gse":
         return only_rna_cli.cmd_run_rna_gse(args)
+
+    if args.command == "tune-rna-sample":
+        return only_rna_cli.cmd_tune_rna_sample(args)
+
+    if args.command == "tune-rna-gse":
+        return only_rna_cli.cmd_tune_rna_gse(args)
 
     if args.command == "download":
         return run_download(
