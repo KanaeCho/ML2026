@@ -8,6 +8,9 @@ import numpy as np
 import pandas as pd
 from scipy import sparse
 
+from .azimuth import run_azimuth_annotation
+from .models import AzimuthConfig
+
 
 @dataclass(frozen=True)
 class CimaReference:
@@ -412,15 +415,31 @@ def annotate_with_all_versions(
     singler_model_path: Path | None = None,
     scanvi_model_path: Path | None = None,
     methods: list[str] | None = None,
+    azimuth_config: AzimuthConfig | None = None,
 ) -> ad.AnnData:
     """Run multiple annotation backends (CIMA, Azimuth, CellTypist, SingleR, scANVI).
     This is a best-effort orchestrator. Individual backends gracefully degrade if
     their libraries/models are unavailable.
     """
+    del azimuth_model_dir
     methods = methods or ["cima"]
     out = annotate_with_cima(adata, reference_dir)
+    out.uns["annotation_method_status"] = {}
     if "azimuth" in methods:
-        out = annotate_with_azimuth(out, azimuth_model_dir=azimuth_model_dir)
+        azimuth_result = run_azimuth_annotation(
+            out,
+            config=azimuth_config or AzimuthConfig(),
+            annotation_level="l1",
+            max_cells=None,
+        )
+        out.uns["annotation_method_status"]["azimuth"] = {
+            "status": azimuth_result.status,
+            "detail": azimuth_result.detail,
+        }
+        if azimuth_result.labels is not None:
+            out.obs.loc[azimuth_result.labels.index, "azimuth_cell_type"] = (
+                azimuth_result.labels.astype("string")
+            )
     if "cell_typist" in methods:
         out = annotate_with_cell_typist(out, model_path=celltypist_model_path)
     if "singler" in methods:
