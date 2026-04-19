@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-from .models import RunConfig
+from .models import EmbeddingConfig, RunConfig
 
 
 def _pass_qc_mask(adata: ad.AnnData) -> pd.Series:
@@ -35,9 +35,38 @@ def _embedding_parameters(n_obs: int, n_vars: int) -> dict[str, float | int]:
     }
 
 
-def _run_scanpy_embedding(pass_qc_adata: ad.AnnData, config: RunConfig) -> ad.AnnData:
-    del config
+def _resolve_embedding_parameters(
+    n_obs: int, n_vars: int, embedding: EmbeddingConfig
+) -> dict[str, float | int]:
+    heuristic = _embedding_parameters(n_obs, n_vars)
+    defaults = EmbeddingConfig()
 
+    n_top_genes = embedding.n_top_genes
+    if n_top_genes == defaults.n_top_genes:
+        n_top_genes = int(heuristic["n_top_genes"])
+
+    n_neighbors = embedding.n_neighbors
+    if n_neighbors == defaults.n_neighbors:
+        n_neighbors = int(heuristic["n_neighbors"])
+
+    resolution = embedding.resolution
+    if resolution == defaults.resolution:
+        resolution = float(heuristic["resolution"])
+
+    n_pcs = max(1, min(int(embedding.n_pcs), n_obs - 1, n_vars))
+
+    return {
+        "n_top_genes": max(1, min(int(n_top_genes), n_vars)),
+        "n_pcs": n_pcs,
+        "n_neighbors": max(2, min(int(n_neighbors), n_obs - 1)),
+        "resolution": float(resolution),
+        "min_dist": float(embedding.min_dist),
+        "spread": float(embedding.spread),
+        "random_state": int(embedding.random_state),
+    }
+
+
+def _run_scanpy_embedding(pass_qc_adata: ad.AnnData, config: RunConfig) -> ad.AnnData:
     out = pass_qc_adata.copy()
     if out.n_obs == 0:
         return out
@@ -50,7 +79,7 @@ def _run_scanpy_embedding(pass_qc_adata: ad.AnnData, config: RunConfig) -> ad.An
     sc.pp.normalize_total(out, target_sum=1e4)
     sc.pp.log1p(out)
 
-    params = _embedding_parameters(out.n_obs, out.n_vars)
+    params = _resolve_embedding_parameters(out.n_obs, out.n_vars, config.embedding)
     n_top_genes = int(params["n_top_genes"])
     sc.pp.highly_variable_genes(
         out,
@@ -59,7 +88,7 @@ def _run_scanpy_embedding(pass_qc_adata: ad.AnnData, config: RunConfig) -> ad.An
         subset=True,
     )
 
-    n_comps = max(1, min(20, out.n_obs - 1, out.n_vars))
+    n_comps = int(params["n_pcs"])
     sc.pp.scale(out, max_value=10)
     sc.tl.pca(out, n_comps=n_comps)
 
@@ -76,7 +105,12 @@ def _run_scanpy_embedding(pass_qc_adata: ad.AnnData, config: RunConfig) -> ad.An
                 ["0"] * out.n_obs, index=out.obs_names, dtype="string"
             )
         try:
-            sc.tl.umap(out)
+            sc.tl.umap(
+                out,
+                min_dist=float(params["min_dist"]),
+                spread=float(params["spread"]),
+                random_state=int(params["random_state"]),
+            )
         except ImportError:
             out.obsm["X_umap"] = np.column_stack(
                 [np.arange(out.n_obs, dtype=float), np.zeros(out.n_obs, dtype=float)]
@@ -123,4 +157,4 @@ def run_embedding(adata: ad.AnnData, config: RunConfig) -> ad.AnnData:
     return out
 
 
-__all__ = ["run_embedding", "_embedding_parameters"]
+__all__ = ["run_embedding", "_embedding_parameters", "_resolve_embedding_parameters"]
