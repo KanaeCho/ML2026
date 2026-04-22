@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -360,22 +360,21 @@ def expected_outputs(
 def expected_rna_outputs(
     sample: RNASample, output_root: Path = RNA_OUTPUT_DIR
 ) -> list[Path]:
-    output_dir = rna_sample_output_dir(sample, output_root)
-    return [
-        output_dir / "qc_overview.png",
-        output_dir / "metadata.csv",
-        output_dir / "metadata_qc.csv",
-        output_dir / "qc_summary.csv",
-        output_dir / "validation_result.csv",
-        output_dir / "umap_rna_clusters.png",
-        output_dir / "umap_rna_cima_cell_type_l1.png",
-        output_dir / "umap_rna_cima_cell_type_l2.png",
-        output_dir / "umap_rna_cima_cell_type_l1_masked.png",
-        output_dir / "matrix" / "matrix.mtx",
-        output_dir / "matrix" / "barcodes.tsv.gz",
-        output_dir / "matrix" / "features.tsv.gz",
-        output_dir / f"{sample.sample_id}_seurat_qc.rds",
-    ]
+    discovered = only_rna_cli.DiscoveredSample(
+        gse=sample.gse,
+        sample_id=sample.sample_id,
+        input_type=sample.input_type,
+        sample_kind="gse_shared" if sample.sample_id == sample.gse else "gsm",
+        supported=sample.supported,
+        note=sample.note,
+        source_name="",
+        matrix_path=sample.matrix_path,
+        barcodes_path=sample.barcodes_path,
+        features_path=sample.features_path,
+        h5_path=sample.h5_path,
+        archive_path=sample.archive_path,
+    )
+    return only_rna_cli._expected_output_paths(discovered, output_root)
 
 
 def outputs_complete(
@@ -395,14 +394,18 @@ def rna_outputs_complete(sample: RNASample, output_root: Path = RNA_OUTPUT_DIR) 
     )
 
 
-def load_status(sample: Sample, output_root: Path = OUTPUT_DIR) -> dict | None:
+def load_status(
+    sample: Sample, output_root: Path = OUTPUT_DIR
+) -> dict[str, Any] | None:
     status_file = sample_status_file(sample, output_root)
     if not status_file.exists():
         return None
     return json.loads(status_file.read_text())
 
 
-def write_status(sample: Sample, payload: dict, output_root: Path = OUTPUT_DIR) -> None:
+def write_status(
+    sample: Sample, payload: dict[str, Any], output_root: Path = OUTPUT_DIR
+) -> None:
     output_dir = sample_output_dir(sample, output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     sample_status_file(sample, output_root).write_text(
@@ -412,7 +415,7 @@ def write_status(sample: Sample, payload: dict, output_root: Path = OUTPUT_DIR) 
 
 def load_rna_status(
     sample: RNASample, output_root: Path = RNA_OUTPUT_DIR
-) -> dict | None:
+) -> dict[str, Any] | None:
     status_file = rna_sample_status_file(sample, output_root)
     if not status_file.exists():
         return None
@@ -420,7 +423,7 @@ def load_rna_status(
 
 
 def write_rna_status(
-    sample: RNASample, payload: dict, output_root: Path = RNA_OUTPUT_DIR
+    sample: RNASample, payload: dict[str, Any], output_root: Path = RNA_OUTPUT_DIR
 ) -> None:
     output_dir = rna_sample_output_dir(sample, output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -583,7 +586,7 @@ def run_rna_sample(
         *sample.command_args(),
     ]
 
-    status_payload = {
+    status_payload: dict[str, Any] = {
         "sample": {"gse": sample.gse, "sample_id": sample.sample_id},
         "command": command,
         "output_root": str(output_root),
@@ -648,7 +651,7 @@ def run_sample(
         str(output_root),
     ]
 
-    status_payload = {
+    status_payload: dict[str, Any] = {
         "sample": {"gse": sample.gse, "gsm": sample.gsm},
         "command": command,
         "output_profile": output_profile,
@@ -796,7 +799,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_rna_gse_parser.add_argument("--dry-run", action="store_true")
 
     tune_rna_sample_parser = subparsers.add_parser(
-        "tune-rna-sample", help="Run bounded tuning for one RNA sample"
+        "tune-rna-sample", help="Run baseline-only tuning for one RNA sample"
     )
     tune_rna_sample_parser.add_argument("--gse", required=True)
     tune_rna_sample_parser.add_argument("--sample-id", required=True)
@@ -811,7 +814,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     tune_rna_gse_parser = subparsers.add_parser(
         "tune-rna-gse",
-        help="Run bounded tuning for all supported RNA samples under one GSE",
+        help="Run baseline-only tuning for all supported RNA samples under one GSE",
     )
     tune_rna_gse_parser.add_argument("--gse", required=True)
     tune_rna_gse_parser.add_argument(

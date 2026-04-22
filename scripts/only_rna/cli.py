@@ -4,7 +4,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .annotation import annotate_with_all_versions
 from .config import load_default_config
@@ -69,15 +69,16 @@ def _expected_output_paths(sample: DiscoveredSample, output_root: Path) -> list[
         output_dir / "metadata.csv",
         output_dir / "metadata_qc.csv",
         output_dir / "qc_summary.csv",
+        output_dir / "qc_thresholds.json",
+        output_dir / "qc_overview.png",
         output_dir / "validation_result.csv",
         output_dir / f"{sample.sample_id}.h5ad",
         output_dir / "matrix" / "matrix.mtx",
         output_dir / "matrix" / "barcodes.tsv.gz",
         output_dir / "matrix" / "features.tsv.gz",
-        output_dir / "umap_rna_clusters.png",
-        output_dir / "umap_rna_cima_cell_type_l1.png",
-        output_dir / "umap_rna_cima_cell_type_l2.png",
-        output_dir / "umap_rna_cima_cell_type_l1_masked.png",
+        output_dir / "umap_rna_pbmcref_vs_cima_l1.png",
+        output_dir / "umap_rna_pbmcref_highlight.png",
+        output_dir / "umap_rna_cima_l1.png",
     ]
 
 
@@ -87,7 +88,9 @@ def _outputs_complete(sample: DiscoveredSample, output_root: Path) -> bool:
     )
 
 
-def _load_rna_status(sample: DiscoveredSample, output_root: Path) -> dict | None:
+def _load_rna_status(
+    sample: DiscoveredSample, output_root: Path
+) -> dict[str, Any] | None:
     status_file = _sample_status_file(sample, output_root)
     if not status_file.exists():
         return None
@@ -95,7 +98,7 @@ def _load_rna_status(sample: DiscoveredSample, output_root: Path) -> dict | None
 
 
 def _write_rna_status(
-    sample: DiscoveredSample, payload: dict, output_root: Path
+    sample: DiscoveredSample, payload: dict[str, Any], output_root: Path
 ) -> None:
     output_dir = _sample_output_dir(sample, output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -134,10 +137,17 @@ def _print_rna_status(samples: Iterable[DiscoveredSample], output_root: Path) ->
         payload = _load_rna_status(sample, output_root) or {}
         status = payload.get("status", "pending")
         payload_output_root = Path(payload.get("output_root", str(output_root)))
+        recorded_outputs_complete = payload.get("outputs_complete")
+        if payload.get("mode") == "tuning" and isinstance(
+            recorded_outputs_complete, bool
+        ):
+            outputs_complete = recorded_outputs_complete
+        else:
+            outputs_complete = _outputs_complete(sample, payload_output_root)
         finished_at = payload.get("finished_at", "")
         print(
             f"{sample.gse}\t{sample.sample_id}\t{sample.sample_kind}\t{status}\t"
-            f"{str(_outputs_complete(sample, payload_output_root)).lower()}\t"
+            f"{str(outputs_complete).lower()}\t"
             f"{str(sample.supported).lower()}\t{finished_at}"
         )
 
@@ -192,7 +202,8 @@ def _execute_rna_sample(sample: DiscoveredSample, args) -> bool:
         celltypist_model_path=None,
         singler_model_path=None,
         scanvi_model_path=None,
-        methods=["cima"],
+        methods=(config.annotation.methods if config.annotation else ["azimuth"]),
+        azimuth_config=config.azimuth,
     )
     write_sample_outputs(
         adata,
@@ -210,9 +221,7 @@ def _execute_tune_rna_sample(sample: DiscoveredSample, args) -> bool:
         sample_id=sample.sample_id,
         gse=sample.gse,
         input_sample=sample,
-        output_dir=_sample_output_dir(
-            sample, Path(getattr(args, "output_root", DEFAULT_OUTPUT_ROOT))
-        ),
+        output_dir=Path(getattr(args, "output_root", DEFAULT_OUTPUT_ROOT)),
         config=config,
     )
     return True
@@ -299,7 +308,7 @@ def _route_tune_rna_sample(sample: DiscoveredSample, args) -> int:
         "started_at": started_at,
         "status": "dry_run" if dry_run else "running",
         "outputs_complete": _outputs_complete(sample, output_root),
-        "note": "Stable RNA CLI routing and bounded tuning execution.",
+        "note": "Stable RNA CLI routing and baseline-only tuning execution.",
         "mode": "tuning",
     }
 

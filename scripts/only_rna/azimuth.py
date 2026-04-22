@@ -17,8 +17,12 @@ from .models import AzimuthConfig
 @dataclass(frozen=True)
 class AzimuthAnnotationResult:
     labels: pd.Series | None
+    labels_by_level: dict[str, pd.Series]
     status: str
     detail: str
+    scores: pd.Series | None = None
+    score_margins: pd.Series | None = None
+    low_confidence: pd.Series | None = None
 
 
 def _pass_qc_subset(adata: ad.AnnData) -> ad.AnnData:
@@ -38,7 +42,7 @@ def _run_azimuth_r(
     k_weight: int = 50,
     n_trees: int = 20,
     mapping_score_k: int = 100,
-) -> pd.Series:
+) -> pd.DataFrame:
     query = _pass_qc_subset(adata)
     if query.n_obs == 0:
         return pd.Series(dtype="string")
@@ -85,11 +89,13 @@ def _run_azimuth_r(
             header=False,
         )
 
+        # Large shared/GSE-level RNA queries can exceed the default future globals cap
+        # inside RunAzimuth even in sequential mode.
         r_code = f"""
         suppressPackageStartupMessages(library(Azimuth))
         suppressPackageStartupMessages(library(Seurat))
         suppressPackageStartupMessages(library(future))
-        options(future.globals.maxSize = 2 * 1024^3)
+        options(future.globals.maxSize = 8 * 1024^3)
         future::plan(\"sequential\")
         counts <- ReadMtx(
           mtx = '{mtx_path.as_posix()}',
@@ -108,8 +114,16 @@ def _run_azimuth_r(
           mapping.score.k = {int(mapping_score_k)}
         )
         md <- mapped[[]]
-        pred_col <- paste0('predicted.celltype.{annotation_level}')
-        out <- data.frame(cell_id = rownames(md), label = md[[pred_col]], row.names = NULL)
+        out <- data.frame(
+          cell_id = rownames(md),
+          label = md[[paste0('predicted.celltype.{annotation_level}')]],
+          label_l1 = if ('predicted.celltype.l1' %in% colnames(md)) md[['predicted.celltype.l1']] else NA,
+          label_l2 = if ('predicted.celltype.l2' %in% colnames(md)) md[['predicted.celltype.l2']] else NA,
+          label_l1_score = if ('predicted.celltype.l1.score' %in% colnames(md)) md[['predicted.celltype.l1.score']] else NA,
+          label_l2_score = if ('predicted.celltype.l2.score' %in% colnames(md)) md[['predicted.celltype.l2.score']] else NA,
+          mapping_score = if ('mapping.score' %in% colnames(md)) md[['mapping.score']] else NA,
+          row.names = NULL
+        )
         write.csv(out, '{output_path.as_posix()}', row.names = FALSE)
         """
         subprocess.run(
@@ -119,11 +133,7 @@ def _run_azimuth_r(
             text=True,
         )
         labels = pd.read_csv(output_path)
-        return pd.Series(
-            labels["label"].astype("string").to_numpy(),
-            index=labels["cell_id"].tolist(),
-            dtype="string",
-        )
+        return labels
 
 
 def run_azimuth_annotation(
@@ -136,6 +146,7 @@ def run_azimuth_annotation(
     if not config.enabled:
         return AzimuthAnnotationResult(
             labels=None,
+            labels_by_level={},
             status="disabled",
             detail="Azimuth disabled in config",
         )
@@ -144,6 +155,7 @@ def run_azimuth_annotation(
     if query.n_obs == 0:
         return AzimuthAnnotationResult(
             labels=None,
+            labels_by_level={},
             status="no_pass_qc",
             detail="No pass_qc cells available for Azimuth",
         )
@@ -161,12 +173,67 @@ def run_azimuth_annotation(
     except Exception as exc:
         return AzimuthAnnotationResult(
             labels=None,
+            labels_by_level={},
             status="error",
             detail=str(exc),
         )
 
+    if isinstance(labels, pd.Series):
+        label_series = labels.astype("string")
+        labels_by_level = {annotation_level: label_series}
+        score_series = None
+        score_margin_series = None
+        low_confidence_series = None
+    else:
+        label_series = pd.Series(
+            labels["label"].astype("string").to_numpy(),
+            index=labels["cell_id"].tolist(),
+            dtype="string",
+        )
+        labels_by_level: dict[str, pd.Series] = {}
+        for level_name, column in (("l1", "label_l1"), ("l2", "label_l2")):
+            if column in labels.columns:
+                labels_by_level[level_name] = pd.Series(
+                    labels[column].astype("string").to_numpy(),
+                    index=labels["cell_id"].tolist(),
+                    dtype="string",
+                )
+        labels_by_level.setdefault(annotation_level, label_series)
+
+        score_column = f"label_{annotation_level}_score"
+        score_series = None
+        if score_column in labels.columns:
+            score_series = pd.Series(
+                pd.to_numeric(labels[score_column], errors="coerce").to_numpy(),
+                index=labels["cell_id"].tolist(),
+                dtype=float,
+            )
+        elif "mapping_score" in labels.columns:
+            score_series = pd.Series(
+                pd.to_numeric(labels["mapping_score"], errors="coerce").to_numpy(),
+                index=labels["cell_id"].tolist(),
+                dtype=float,
+            )
+
+        if score_series is not None:
+            # Current Azimuth export exposes one confidence score column, so reuse it
+            # as a monotonic confidence margin surrogate until top2 probabilities are exported.
+            score_margin_series = score_series.copy()
+            low_confidence_series = pd.Series(
+                score_series.fillna(0.0) < 0.5,
+                index=score_series.index,
+                dtype="boolean",
+            )
+        else:
+            score_margin_series = None
+            low_confidence_series = None
+
     return AzimuthAnnotationResult(
-        labels=labels,
+        labels=label_series,
+        labels_by_level=labels_by_level,
+        scores=score_series,
+        score_margins=score_margin_series,
+        low_confidence=low_confidence_series,
         status="ok",
         detail=config.reference,
     )

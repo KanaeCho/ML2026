@@ -1,8 +1,18 @@
 qc:
-  min_counts: 500
-  min_genes: 300
-  max_pct_mt: 20.0
-  max_pct_ribo: 60.0
+  method: dynamic_hybrid_mad
+  counts_lower_nmads: 2.5
+  genes_lower_nmads: 2.5
+  pct_mt_upper_nmads: 2.5
+  pct_ribo_upper_nmads: 3.5
+  min_cells_for_dynamic: 50
+  count_floor_min: 100
+  count_floor_max: 1500
+  gene_floor_min: 100
+  gene_floor_max: 1200
+  pct_mt_ceiling_min: 5.0
+  pct_mt_ceiling_max: 40.0
+  pct_ribo_ceiling_min: 20.0
+  pct_ribo_ceiling_max: 80.0
 plotting:
   umap_width: 10.0
   umap_height: 8.0
@@ -12,4 +22,15 @@ plotting:
   legend_title_fontsize: 11.0
 annotation:
   methods:
-    - cima
+    - azimuth
+azimuth:
+  enabled: true
+  reference: pbmcref
+  annotation_levels:
+    - l1
+    - l2
+tuning:
+  qc_preset_family: baseline_only
+  azimuth_preset_family: baseline_only
+  embedding_preset_family: baseline_only
+  max_candidates: 1

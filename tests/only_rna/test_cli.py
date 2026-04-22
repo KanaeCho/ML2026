@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
 from scripts.only_rna import cli
 from scripts.only_rna.discovery import DiscoveredSample
@@ -105,6 +106,37 @@ def test_cmd_rna_status_uses_new_output_family_with_h5ad(
         line.startswith("GSE123456\tGSM000002\tgsm\tsuccess\tfalse")
         for line in lines[1:]
     )
+
+
+def test_pipeline_expected_rna_outputs_uses_azimuth_only_contract(
+    tmp_path: Path,
+) -> None:
+    sample = pipeline.RNASample(
+        gse="GSE123456",
+        sample_id="GSM123456",
+        input_type="triplet",
+        supported=True,
+        note="fixture",
+    )
+
+    paths = pipeline.expected_rna_outputs(sample, output_root=tmp_path)
+    output_dir = tmp_path / sample.gse / sample.sample_id
+
+    assert [path.relative_to(output_dir).as_posix() for path in paths] == [
+        "metadata.csv",
+        "metadata_qc.csv",
+        "qc_summary.csv",
+        "qc_thresholds.json",
+        "qc_overview.png",
+        "validation_result.csv",
+        "GSM123456.h5ad",
+        "matrix/matrix.mtx",
+        "matrix/barcodes.tsv.gz",
+        "matrix/features.tsv.gz",
+        "umap_rna_pbmcref_vs_cima_l1.png",
+        "umap_rna_pbmcref_highlight.png",
+        "umap_rna_cima_l1.png",
+    ]
 
 
 def test_pipeline_discover_rna_routes_to_only_rna_cli(monkeypatch) -> None:
@@ -283,6 +315,25 @@ def test_cmd_tune_rna_sample_executes_bounded_tuning_when_not_dry_run(
     assert status["status"] == "success"
 
 
+def test_execute_tune_rna_sample_passes_output_root_without_double_nesting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sample = _make_sample(gse="GSE167363", sample_id="GSM5102900")
+    captured: dict[str, Path] = {}
+
+    monkeypatch.setattr(cli, "load_default_config", lambda path: object())
+
+    def fake_run_bounded_tuning(**kwargs):
+        captured["output_dir"] = Path(kwargs["output_dir"])
+
+    monkeypatch.setattr(cli, "run_bounded_tuning", fake_run_bounded_tuning)
+
+    args = SimpleNamespace(output_root=str(tmp_path))
+    cli._execute_tune_rna_sample(sample, args)
+
+    assert captured["output_dir"] == tmp_path
+
+
 def test_cmd_tune_rna_sample_dry_run_records_tuning_mode_and_flags(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -314,6 +365,43 @@ def test_cmd_tune_rna_sample_dry_run_records_tuning_mode_and_flags(
     assert "--output-root" in status["command"]
     assert "--force" in status["command"]
     assert "--dry-run" in status["command"]
+
+
+def test_cmd_rna_status_uses_recorded_outputs_complete_for_successful_tuning_runs(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    tuning_sample = _make_sample(gse="GSE157007", sample_id="GSM4750304")
+    monkeypatch.setattr(
+        cli,
+        "_discover_selected_rna_samples",
+        lambda gse=None: [tuning_sample],
+    )
+    monkeypatch.setattr(cli, "DEFAULT_OUTPUT_ROOT", tmp_path)
+
+    sample_dir = tmp_path / tuning_sample.gse / tuning_sample.sample_id
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    (sample_dir / "run_status.json").write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "finished_at": "2026-04-19T07:55:50Z",
+                "output_root": str(tmp_path),
+                "mode": "tuning",
+                "outputs_complete": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    returncode = cli.cmd_rna_status(SimpleNamespace(gse="GSE157007"))
+
+    assert returncode == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert any(
+        line.startswith("GSE157007\tGSM4750304\tgsm\tsuccess\ttrue")
+        for line in lines[1:]
+    )
 
 
 def test_cmd_tune_rna_gse_includes_supported_shared_triplet_when_present(
@@ -360,7 +448,7 @@ def _make_sample(
     gse: str,
     sample_id: str,
     input_type: str = "triplet",
-    sample_kind: str = "gsm",
+    sample_kind: Literal["gsm", "gse_shared"] = "gsm",
     supported: bool = True,
 ) -> DiscoveredSample:
     return DiscoveredSample(
@@ -378,22 +466,28 @@ def _make_sample(
 
 
 def _touch_output_family(
-    root: Path, sample: DiscoveredSample, *, include_h5ad: bool
+    root: Path,
+    sample: DiscoveredSample,
+    *,
+    include_h5ad: bool,
+    include_qc_overview: bool = True,
 ) -> None:
     sample_dir = root / sample.gse / sample.sample_id
     relpaths = [
         "metadata.csv",
         "metadata_qc.csv",
         "qc_summary.csv",
+        "qc_thresholds.json",
         "validation_result.csv",
         "matrix/matrix.mtx",
         "matrix/barcodes.tsv.gz",
         "matrix/features.tsv.gz",
-        "umap_rna_clusters.png",
-        "umap_rna_cima_cell_type_l1.png",
-        "umap_rna_cima_cell_type_l2.png",
-        "umap_rna_cima_cell_type_l1_masked.png",
+        "umap_rna_pbmcref_vs_cima_l1.png",
+        "umap_rna_pbmcref_highlight.png",
+        "umap_rna_cima_l1.png",
     ]
+    if include_qc_overview:
+        relpaths.append("qc_overview.png")
     if include_h5ad:
         relpaths.append(f"{sample.sample_id}.h5ad")
 
@@ -412,4 +506,30 @@ def _touch_output_family(
         )
         + "\n",
         encoding="utf-8",
+    )
+
+
+def test_cmd_rna_status_requires_qc_overview_in_output_family(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    sample = _make_sample(gse="GSE123456", sample_id="GSM000003")
+    monkeypatch.setattr(
+        cli, "_discover_selected_rna_samples", lambda gse=None: [sample]
+    )
+    monkeypatch.setattr(cli, "DEFAULT_OUTPUT_ROOT", tmp_path)
+
+    _touch_output_family(
+        tmp_path,
+        sample,
+        include_h5ad=True,
+        include_qc_overview=False,
+    )
+
+    returncode = cli.cmd_rna_status(SimpleNamespace(gse="GSE123456"))
+
+    assert returncode == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert any(
+        line.startswith("GSE123456\tGSM000003\tgsm\tsuccess\tfalse")
+        for line in lines[1:]
     )

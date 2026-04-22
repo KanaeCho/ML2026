@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from dataclasses import asdict, is_dataclass
+from typing import Any, Iterable, cast
 import yaml
 
 from .models import (
@@ -31,10 +32,20 @@ def load_run_config(path: Path) -> RunConfig:
     tuning_map = data.get("tuning", {})
 
     qc = QcThresholds(
-        min_counts=int(qc_map.get("min_counts", 0)),
-        min_genes=int(qc_map.get("min_genes", 0)),
-        max_pct_mt=float(qc_map.get("max_pct_mt", 0.0)),
-        max_pct_ribo=float(qc_map.get("max_pct_ribo", 0.0)),
+        method=str(qc_map.get("method", "dynamic_hybrid_mad")),
+        counts_lower_nmads=float(qc_map.get("counts_lower_nmads", 3.0)),
+        genes_lower_nmads=float(qc_map.get("genes_lower_nmads", 3.0)),
+        pct_mt_upper_nmads=float(qc_map.get("pct_mt_upper_nmads", 3.0)),
+        pct_ribo_upper_nmads=float(qc_map.get("pct_ribo_upper_nmads", 3.5)),
+        min_cells_for_dynamic=int(qc_map.get("min_cells_for_dynamic", 50)),
+        count_floor_min=int(qc_map.get("count_floor_min", 100)),
+        count_floor_max=int(qc_map.get("count_floor_max", 1500)),
+        gene_floor_min=int(qc_map.get("gene_floor_min", 100)),
+        gene_floor_max=int(qc_map.get("gene_floor_max", 1200)),
+        pct_mt_ceiling_min=float(qc_map.get("pct_mt_ceiling_min", 5.0)),
+        pct_mt_ceiling_max=float(qc_map.get("pct_mt_ceiling_max", 40.0)),
+        pct_ribo_ceiling_min=float(qc_map.get("pct_ribo_ceiling_min", 20.0)),
+        pct_ribo_ceiling_max=float(qc_map.get("pct_ribo_ceiling_max", 80.0)),
     )
 
     plotting = PlottingConfig(
@@ -71,7 +82,7 @@ def load_run_config(path: Path) -> RunConfig:
         embedding_preset_family=str(
             tuning_map.get("embedding_preset_family", "default")
         ),
-        max_candidates=int(tuning_map.get("max_candidates", 9)),
+        max_candidates=int(tuning_map.get("max_candidates", 1)),
     )
 
     anno_map = data.get("annotation", {}) or {}
@@ -103,10 +114,20 @@ def merge_cli_overrides(base: RunConfig, **overrides) -> RunConfig:
     """
     # Start from the base values as dicts to allow selective overrides
     qc = {
-        "min_counts": base.qc.min_counts,
-        "min_genes": base.qc.min_genes,
-        "max_pct_mt": base.qc.max_pct_mt,
-        "max_pct_ribo": base.qc.max_pct_ribo,
+        "method": base.qc.method,
+        "counts_lower_nmads": base.qc.counts_lower_nmads,
+        "genes_lower_nmads": base.qc.genes_lower_nmads,
+        "pct_mt_upper_nmads": base.qc.pct_mt_upper_nmads,
+        "pct_ribo_upper_nmads": base.qc.pct_ribo_upper_nmads,
+        "min_cells_for_dynamic": base.qc.min_cells_for_dynamic,
+        "count_floor_min": base.qc.count_floor_min,
+        "count_floor_max": base.qc.count_floor_max,
+        "gene_floor_min": base.qc.gene_floor_min,
+        "gene_floor_max": base.qc.gene_floor_max,
+        "pct_mt_ceiling_min": base.qc.pct_mt_ceiling_min,
+        "pct_mt_ceiling_max": base.qc.pct_mt_ceiling_max,
+        "pct_ribo_ceiling_min": base.qc.pct_ribo_ceiling_min,
+        "pct_ribo_ceiling_max": base.qc.pct_ribo_ceiling_max,
     }
     plotting = {
         "umap_width": base.plotting.umap_width,
@@ -141,18 +162,18 @@ def merge_cli_overrides(base: RunConfig, **overrides) -> RunConfig:
     }
     annotation = base.annotation
 
-    def _normalize_section(value):
+    def _normalize_section(value: Any) -> Any:
         if is_dataclass(value):
-            return asdict(value)
+            return asdict(cast(Any, value))
         return value
 
     for key, value in overrides.items():
         # Support plan-aligned simple top-level overrides first
         if key == "min_genes":
-            qc["min_genes"] = int(value)
+            qc["gene_floor_min"] = int(value)
             continue
         if key == "mt_max":
-            qc["max_pct_mt"] = float(value)
+            qc["pct_mt_ceiling_max"] = float(value)
             continue
         if key in ("min_counts", "min_genes", "max_pct_mt", "max_pct_ribo"):
             # Overlays provided as simple overrides (nested under qc)
@@ -185,10 +206,20 @@ def merge_cli_overrides(base: RunConfig, **overrides) -> RunConfig:
                 tuning = _normalize_section(value)  # type: ignore[assignment]
 
     new_qc = QcThresholds(
-        min_counts=int(qc["min_counts"]),
-        min_genes=int(qc["min_genes"]),
-        max_pct_mt=float(qc["max_pct_mt"]),
-        max_pct_ribo=float(qc["max_pct_ribo"]),
+        method=str(qc["method"]),
+        counts_lower_nmads=float(qc["counts_lower_nmads"]),
+        genes_lower_nmads=float(qc["genes_lower_nmads"]),
+        pct_mt_upper_nmads=float(qc["pct_mt_upper_nmads"]),
+        pct_ribo_upper_nmads=float(qc["pct_ribo_upper_nmads"]),
+        min_cells_for_dynamic=int(qc["min_cells_for_dynamic"]),
+        count_floor_min=int(qc["count_floor_min"]),
+        count_floor_max=int(qc["count_floor_max"]),
+        gene_floor_min=int(qc["gene_floor_min"]),
+        gene_floor_max=int(qc["gene_floor_max"]),
+        pct_mt_ceiling_min=float(qc["pct_mt_ceiling_min"]),
+        pct_mt_ceiling_max=float(qc["pct_mt_ceiling_max"]),
+        pct_ribo_ceiling_min=float(qc["pct_ribo_ceiling_min"]),
+        pct_ribo_ceiling_max=float(qc["pct_ribo_ceiling_max"]),
     )
     new_plotting = PlottingConfig(
         umap_width=float(plotting["umap_width"]),
@@ -212,10 +243,12 @@ def merge_cli_overrides(base: RunConfig, **overrides) -> RunConfig:
     new_azimuth = AzimuthConfig(
         enabled=bool(azimuth["enabled"]),
         reference=str(azimuth["reference"]),
-        annotation_levels=tuple(azimuth["annotation_levels"]),
-        k_weight=int(azimuth["k_weight"]),
-        n_trees=int(azimuth["n_trees"]),
-        mapping_score_k=int(azimuth["mapping_score_k"]),
+        annotation_levels=tuple(
+            cast(Iterable[str], azimuth["annotation_levels"])
+        ),
+        k_weight=int(cast(Any, azimuth["k_weight"])),
+        n_trees=int(cast(Any, azimuth["n_trees"])),
+        mapping_score_k=int(cast(Any, azimuth["mapping_score_k"])),
     )
 
     new_tuning = TuningConfig(

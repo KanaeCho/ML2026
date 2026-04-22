@@ -9,6 +9,7 @@ import pandas as pd
 from scipy import sparse
 
 from .azimuth import run_azimuth_annotation
+from .label_alignment import align_pbmcref_to_cima_l1
 from .models import AzimuthConfig
 
 
@@ -45,9 +46,13 @@ ANNOTATION_BOOL_COLUMNS = ["cima_l1_low_confidence"]
 # the CIMA schema for consistency with plotting logic.
 ANNOTATION_AZIMUTH_COLUMNS = [
     "azimuth_cell_type",
+    "azimuth_cell_type_l1_raw",
+    "azimuth_cell_type_l2_raw",
+    "azimuth_cima_l1",
     "azimuth_score",
     "azimuth_score_margin",
     "azimuth_low_confidence",
+    "azimuth_cima_l1_unmapped",
 ]
 
 # CellTypist: alternative cell-type annotations
@@ -76,6 +81,9 @@ ANNOTATION_SCANVI_COLUMNS = [
 
 ALTERNATIVE_ANNOTATION_STRING_COLUMNS = [
     "azimuth_cell_type",
+    "azimuth_cell_type_l1_raw",
+    "azimuth_cell_type_l2_raw",
+    "azimuth_cima_l1",
     "celltypist_cell_type",
     "singler_cell_type",
     "scanvi_cell_type",
@@ -92,6 +100,7 @@ ALTERNATIVE_ANNOTATION_FLOAT_COLUMNS = [
 ]
 ALTERNATIVE_ANNOTATION_BOOL_COLUMNS = [
     "azimuth_low_confidence",
+    "azimuth_cima_l1_unmapped",
     "celltypist_low_confidence",
     "singler_low_confidence",
     "scanvi_low_confidence",
@@ -422,14 +431,23 @@ def annotate_with_all_versions(
     their libraries/models are unavailable.
     """
     del azimuth_model_dir
-    methods = methods or ["cima"]
-    out = annotate_with_cima(adata, reference_dir)
+    methods = methods or ["azimuth"]
+    out = adata.copy()
+    _initialize_annotation_columns(out.obs)
     out.uns["annotation_method_status"] = {}
+    if "cima" in methods:
+        out = annotate_with_cima(out, reference_dir)
     if "azimuth" in methods:
+        effective_azimuth_config = azimuth_config or AzimuthConfig()
+        annotation_level = (
+            effective_azimuth_config.annotation_levels[0]
+            if effective_azimuth_config.annotation_levels
+            else "l1"
+        )
         azimuth_result = run_azimuth_annotation(
             out,
-            config=azimuth_config or AzimuthConfig(),
-            annotation_level="l1",
+            config=effective_azimuth_config,
+            annotation_level=annotation_level,
             max_cells=None,
         )
         out.uns["annotation_method_status"]["azimuth"] = {
@@ -439,6 +457,42 @@ def annotate_with_all_versions(
         if azimuth_result.labels is not None:
             out.obs.loc[azimuth_result.labels.index, "azimuth_cell_type"] = (
                 azimuth_result.labels.astype("string")
+            )
+            azimuth_scores = getattr(azimuth_result, "scores", None)
+            azimuth_score_margins = getattr(azimuth_result, "score_margins", None)
+            azimuth_low_conf = getattr(azimuth_result, "low_confidence", None)
+            if azimuth_scores is not None:
+                out.obs.loc[azimuth_scores.index, "azimuth_score"] = azimuth_scores
+            if azimuth_score_margins is not None:
+                out.obs.loc[
+                    azimuth_score_margins.index, "azimuth_score_margin"
+                ] = azimuth_score_margins
+            if azimuth_low_conf is not None:
+                out.obs.loc[
+                    azimuth_low_conf.index, "azimuth_low_confidence"
+                ] = azimuth_low_conf.astype("boolean")
+            raw_l1 = azimuth_result.labels_by_level.get("l1")
+            raw_l2 = azimuth_result.labels_by_level.get("l2")
+            if raw_l1 is None and annotation_level == "l1":
+                raw_l1 = azimuth_result.labels.astype("string")
+            if raw_l2 is None and annotation_level == "l2":
+                raw_l2 = azimuth_result.labels.astype("string")
+
+            aligned_l1, unmapped = align_pbmcref_to_cima_l1(raw_l1, raw_l2)
+
+            if raw_l1 is not None:
+                out.obs.loc[raw_l1.index, "azimuth_cell_type_l1_raw"] = raw_l1.astype(
+                    "string"
+                )
+            if raw_l2 is not None:
+                out.obs.loc[raw_l2.index, "azimuth_cell_type_l2_raw"] = raw_l2.astype(
+                    "string"
+                )
+            out.obs.loc[aligned_l1.index, "azimuth_cima_l1"] = aligned_l1.astype(
+                "string"
+            )
+            out.obs.loc[unmapped.index, "azimuth_cima_l1_unmapped"] = unmapped.astype(
+                "boolean"
             )
     if "cell_typist" in methods:
         out = annotate_with_cell_typist(out, model_path=celltypist_model_path)

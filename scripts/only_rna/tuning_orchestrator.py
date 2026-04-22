@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
+
+import anndata as ad
+import pandas as pd
 
 from .annotation import annotate_with_all_versions
 from .config import merge_cli_overrides
-from .discovery import ROOT, resolve_data_root
+from .discovery import ROOT, DiscoveredSample, resolve_data_root
 from .doublet import run_doublet_detection
 from .embedding import run_embedding
-from .outputs import write_sample_outputs, write_tuning_selection_artifacts
+from .outputs import write_sample_outputs
 from .qc import apply_qc_filters, compute_qc_metrics
 from .read_inputs import read_sample_input
 from .models import RunConfig
@@ -53,36 +58,45 @@ def _resolve_candidate_config(candidate_id: str, base_config: RunConfig) -> RunC
 
 
 def _candidate_output_root(output_dir: Path, candidate_id: str) -> Path:
-    return Path(output_dir) / "tuning" / candidate_id
+    del candidate_id
+    return Path(output_dir)
 
 
-def _mean_confidence(series: object, pass_qc_mask) -> float:
+def _prune_stale_candidate_outputs(output_dir: Path, candidate_specs: list[CandidateSpec]) -> None:
+    del candidate_specs
+    tuning_dir = Path(output_dir) / "tuning"
+    if tuning_dir.exists():
+        shutil.rmtree(tuning_dir)
+
+
+def _mean_confidence(series: pd.Series | None, pass_qc_mask: pd.Series) -> float:
     if series is None:
         return 0.0
-    values = series.loc[pass_qc_mask]  # type: ignore[index]
+    values = series.loc[pass_qc_mask]
     numeric = values.dropna().astype(float)
     if len(numeric) == 0:
         return 0.0
     return float(numeric.mean())
 
 
-def _low_confidence_fraction(series: object, pass_qc_mask) -> float:
+def _low_confidence_fraction(series: pd.Series | None, pass_qc_mask: pd.Series) -> float:
     if series is None:
         return 0.0
-    values = series.loc[pass_qc_mask].fillna(False).astype(bool)  # type: ignore[index]
+    values = series.loc[pass_qc_mask].fillna(False).astype(bool)
     if len(values) == 0:
         return 0.0
     return float(values.mean())
 
 
-def _embedding_metrics(adata) -> tuple[float, float]:
-    pass_qc_mask = adata.obs["pass_qc"].fillna(False).astype(bool)
-    pass_qc = int(pass_qc_mask.sum())
+def _embedding_metrics(adata: ad.AnnData) -> tuple[float, float]:
+    obs = cast(pd.DataFrame, adata.obs)
+    pass_qc_mask = cast(pd.Series, obs["pass_qc"].fillna(False).astype(bool))
+    pass_qc = int(pass_qc_mask.to_numpy(dtype=bool).sum())
     if pass_qc <= 0:
         return 0.0, 1.0
 
     clustered = (
-        adata.obs.loc[pass_qc_mask, "cluster"] if "cluster" in adata.obs else None
+        obs.loc[pass_qc_mask, "cluster"] if "cluster" in obs.columns else None
     )
     if clustered is None:
         return 0.0, 1.0
@@ -107,32 +121,12 @@ class BoundedTuningResult:
 def _candidate_priority_order() -> list[CandidateSpec]:
     return [
         CandidateSpec("baseline", "baseline", "baseline"),
-        CandidateSpec("strict", "baseline", "stable"),
-        CandidateSpec("lenient", "baseline", "separated"),
-        CandidateSpec("baseline", "conservative", "baseline"),
-        CandidateSpec("baseline", "smooth", "baseline"),
-        CandidateSpec("strict", "conservative", "stable"),
-        CandidateSpec("strict", "smooth", "stable"),
-        CandidateSpec("lenient", "conservative", "separated"),
-        CandidateSpec("lenient", "smooth", "separated"),
     ]
 
 
 def _enumerate_candidates(config: RunConfig) -> list[CandidateSpec]:
-    presets = default_tuning_presets()
-    valid_qc = set(presets.qc)
-    valid_azimuth = set(presets.azimuth)
-    valid_embedding = set(presets.embedding)
-    max_candidates = max(1, int(config.tuning.max_candidates))
-
-    ordered = [
-        candidate
-        for candidate in _candidate_priority_order()
-        if candidate.qc_preset_id in valid_qc
-        and candidate.azimuth_preset_id in valid_azimuth
-        and candidate.embedding_preset_id in valid_embedding
-    ]
-    return ordered[:max_candidates]
+    del config
+    return _candidate_priority_order()
 
 
 def evaluate_candidate(
@@ -140,7 +134,7 @@ def evaluate_candidate(
     candidate_id: str,
     sample_id: str,
     gse: str,
-    input_sample: object,
+    input_sample: DiscoveredSample,
     config: RunConfig,
     output_dir: Path,
 ) -> CandidateEvaluation:
@@ -158,7 +152,7 @@ def evaluate_candidate(
         celltypist_model_path=None,
         singler_model_path=None,
         scanvi_model_path=None,
-        methods=["cima", "azimuth"],
+        methods=["azimuth"],
         azimuth_config=candidate_config.azimuth,
     )
 
@@ -171,22 +165,31 @@ def evaluate_candidate(
         config=candidate_config,
     )
 
-    pass_qc_mask = adata.obs["pass_qc"].fillna(False).astype(bool)
+    obs = cast(pd.DataFrame, adata.obs)
+    pass_qc_mask = cast(pd.Series, obs["pass_qc"].fillna(False).astype(bool))
     n_cells_total = int(adata.n_obs)
-    n_cells_pass_qc = int(pass_qc_mask.sum())
+    n_cells_pass_qc = int(pass_qc_mask.to_numpy(dtype=bool).sum())
     qc_score = score_qc_metrics(
         n_cells_total=n_cells_total,
         n_cells_pass_qc=n_cells_pass_qc,
     )
 
-    annotation_status = dict(adata.uns.get("annotation_method_status", {})).get(
+    annotation_status = dict(cast(Any, adata.uns.get("annotation_method_status", {}))).get(
         "azimuth", {}
     )
     annotation_score = score_annotation_metrics(
         method_status=str(annotation_status.get("status", "")),
-        confidence_mean=_mean_confidence(adata.obs.get("azimuth_score"), pass_qc_mask),
+        confidence_mean=_mean_confidence(
+            cast(pd.Series | None, obs["azimuth_score"])
+            if "azimuth_score" in obs.columns
+            else None,
+            pass_qc_mask,
+        ),
         low_confidence_fraction=_low_confidence_fraction(
-            adata.obs.get("azimuth_low_confidence"), pass_qc_mask
+            cast(pd.Series | None, obs["azimuth_low_confidence"])
+            if "azimuth_low_confidence" in obs.columns
+            else None,
+            pass_qc_mask,
         ),
     )
 
@@ -217,65 +220,33 @@ def run_bounded_tuning(
     *,
     sample_id: str,
     gse: str,
-    input_sample: object,
+    input_sample: DiscoveredSample,
     output_dir: Path,
     config: RunConfig,
 ) -> BoundedTuningResult:
     candidate_specs = _enumerate_candidates(config)
-    evaluations: list[CandidateEvaluation] = []
-
-    for candidate in candidate_specs:
-        try:
-            evaluation = evaluate_candidate(
-                candidate_id=candidate.candidate_id,
-                sample_id=sample_id,
-                gse=gse,
-                input_sample=input_sample,
-                config=config,
-                output_dir=output_dir,
-            )
-        except Exception as exc:
-            evaluation = CandidateEvaluation(
-                candidate_id=candidate.candidate_id,
-                total_score=0.0,
-                reason_code=f"evaluation_error:{exc}",
-            )
-        evaluations.append(evaluation)
-
-    if not evaluations:
+    _prune_stale_candidate_outputs(Path(output_dir), candidate_specs)
+    if not candidate_specs:
         raise ValueError("No tuning candidates were generated")
 
-    successful_evaluations = [
-        evaluation
-        for evaluation in evaluations
-        if not str(evaluation.reason_code).startswith("evaluation_error:")
-    ]
-
-    if not successful_evaluations:
-        write_tuning_selection_artifacts(
-            output_dir=Path(output_dir),
+    candidate = candidate_specs[0]
+    try:
+        best = evaluate_candidate(
+            candidate_id=candidate.candidate_id,
             sample_id=sample_id,
             gse=gse,
-            candidate_specs=candidate_specs,
-            evaluations=evaluations,
-            best_candidate_id="",
+            input_sample=input_sample,
+            config=config,
+            output_dir=output_dir,
         )
-        raise ValueError("All tuning candidates failed evaluation")
+    except Exception as exc:
+        raise ValueError(f"Baseline tuning candidate failed evaluation: {exc}") from exc
 
-    best = max(successful_evaluations, key=lambda evaluation: evaluation.total_score)
-    tuning_dir = write_tuning_selection_artifacts(
-        output_dir=Path(output_dir),
-        sample_id=sample_id,
-        gse=gse,
-        candidate_specs=candidate_specs,
-        evaluations=evaluations,
-        best_candidate_id=best.candidate_id,
-    )
     return BoundedTuningResult(
         best_candidate_id=best.candidate_id,
         best_total_score=float(best.total_score),
         reason_code=best.reason_code,
-        tuning_dir=tuning_dir,
+        tuning_dir=Path(output_dir),
     )
 
 

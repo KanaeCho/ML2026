@@ -32,10 +32,11 @@ def test_load_default_config():
 
 def test_defaults_values_taken_from_yaml():
     cfg = load_default_config(Path("scripts/only_rna/default_config.yaml"))
-    assert cfg.qc.min_counts == 500
-    assert cfg.qc.min_genes == 300
-    assert cfg.qc.max_pct_mt == 20.0
-    assert cfg.qc.max_pct_ribo == 60.0
+    assert cfg.qc.method == "dynamic_hybrid_mad"
+    assert cfg.qc.counts_lower_nmads == 2.5
+    assert cfg.qc.genes_lower_nmads == 2.5
+    assert cfg.qc.pct_mt_upper_nmads == 2.5
+    assert cfg.qc.pct_ribo_upper_nmads == 3.5
 
 
 def test_plotting_dimensions_positive():
@@ -50,10 +51,10 @@ def test_merge_cli_overrides_only_touch_selected():
     merged = merge_cli_overrides(base, min_genes=350, mt_max=18.0)
 
     assert isinstance(merged, RunConfig)
-    assert merged.qc.min_genes == 350
-    assert merged.qc.max_pct_mt == 18.0
+    assert merged.qc.gene_floor_min == 350
+    assert merged.qc.pct_mt_ceiling_max == 18.0
     # Ensure other fields are preserved from base
-    assert merged.qc.min_counts == base.qc.min_counts
+    assert merged.qc.count_floor_min == base.qc.count_floor_min
     assert merged.plotting.umap_width == base.plotting.umap_width
     assert merged.plotting.umap_height == base.plotting.umap_height
     # ensure untouched fields preserved
@@ -62,10 +63,20 @@ def test_merge_cli_overrides_only_touch_selected():
 def _make_run_config() -> RunConfig:
     return RunConfig(
         qc=QcThresholds(
-            min_counts=5,
-            min_genes=2,
-            max_pct_mt=20.0,
-            max_pct_ribo=40.0,
+            method="dynamic_hybrid_mad",
+            counts_lower_nmads=3.0,
+            genes_lower_nmads=3.0,
+            pct_mt_upper_nmads=3.0,
+            pct_ribo_upper_nmads=3.0,
+            min_cells_for_dynamic=4,
+            count_floor_min=5,
+            count_floor_max=1000,
+            gene_floor_min=2,
+            gene_floor_max=500,
+            pct_mt_ceiling_min=5.0,
+            pct_mt_ceiling_max=20.0,
+            pct_ribo_ceiling_min=10.0,
+            pct_ribo_ceiling_max=40.0,
         ),
         plotting=PlottingConfig(
             umap_width=8.0,
@@ -124,6 +135,71 @@ def test_apply_qc_filters_sets_fail_flags_and_doublet_hard_filter():
     assert out.obs["fails_ribo_ceiling"].tolist() == [False, False, True, False]
     assert out.obs["fails_doublet"].tolist() == [False, False, False, True]
     assert out.obs["pass_qc"].tolist() == [True, False, False, False]
+    assert "qc_thresholds" in out.uns
+    assert out.uns["qc_thresholds"]["method"] == "dynamic_hybrid_mad"
+
+
+def test_apply_qc_filters_computes_counts_and_genes_thresholds_in_log_space():
+    adata = _make_qc_adata()
+    config = _make_run_config()
+
+    with_metrics = compute_qc_metrics(adata, config)
+    out = apply_qc_filters(with_metrics, config)
+
+    thresholds = out.uns["qc_thresholds"]
+    assert thresholds["n_counts_audit"]["transform"] == "log10p1"
+    assert thresholds["n_counts_audit"]["direction"] == "lower"
+    assert thresholds["n_genes_audit"]["transform"] == "log10p1"
+    assert thresholds["n_genes_audit"]["direction"] == "lower"
+
+
+def test_apply_qc_filters_computes_mt_and_ribo_thresholds_in_original_space():
+    adata = _make_qc_adata()
+    config = _make_run_config()
+
+    with_metrics = compute_qc_metrics(adata, config)
+    out = apply_qc_filters(with_metrics, config)
+
+    thresholds = out.uns["qc_thresholds"]
+    assert thresholds["pct_mt_audit"]["transform"] == "identity"
+    assert thresholds["pct_mt_audit"]["direction"] == "upper"
+    assert thresholds["pct_ribo_audit"]["transform"] == "identity"
+    assert thresholds["pct_ribo_audit"]["direction"] == "upper"
+
+
+def test_apply_qc_filters_applies_guardrail_bounds():
+    adata = _make_qc_adata()
+    config = _make_run_config()
+    with_metrics = compute_qc_metrics(adata, config)
+
+    out = apply_qc_filters(with_metrics, config)
+    thresholds = out.uns["qc_thresholds"]
+
+    assert thresholds["min_counts"] >= config.qc.count_floor_min
+    assert thresholds["min_counts"] <= config.qc.count_floor_max
+    assert thresholds["min_genes"] >= config.qc.gene_floor_min
+    assert thresholds["min_genes"] <= config.qc.gene_floor_max
+    assert thresholds["max_pct_mt"] >= config.qc.pct_mt_ceiling_min
+    assert thresholds["max_pct_mt"] <= config.qc.pct_mt_ceiling_max
+    assert thresholds["max_pct_ribo"] >= config.qc.pct_ribo_ceiling_min
+    assert thresholds["max_pct_ribo"] <= config.qc.pct_ribo_ceiling_max
+
+
+def test_apply_qc_filters_handles_zero_mad_without_crash():
+    adata = ad.AnnData(
+        X=np.array([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]], dtype=float),
+        obs=pd.DataFrame(index=["cell-1", "cell-2", "cell-3"]),
+        var=pd.DataFrame(index=["GeneA", "GeneB"]),
+    )
+    adata.obs["gse"] = "GSE1"
+    adata.obs["sample_id"] = "GSM1"
+    config = _make_run_config()
+
+    with_metrics = compute_qc_metrics(adata, config)
+    out = apply_qc_filters(with_metrics, config)
+
+    assert "qc_thresholds" in out.uns
+    assert out.uns["qc_thresholds"]["zero_mad_metrics"]
 
 
 def test_run_doublet_detection_normalizes_existing_columns_without_scrublet(

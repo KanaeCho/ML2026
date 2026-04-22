@@ -238,7 +238,9 @@ def test_annotate_with_all_versions_keeps_na_azimuth_labels_and_records_error_st
     }
 
 
-def test_write_sample_outputs_emits_four_method_comparison_umap(tmp_path: Path):
+def test_write_sample_outputs_does_not_emit_retired_multimethod_comparison_umap(
+    tmp_path: Path,
+):
     config = _make_run_config()
     adata = ad.AnnData(
         X=sparse.csr_matrix(np.eye(4)),
@@ -273,14 +275,13 @@ def test_write_sample_outputs_emits_four_method_comparison_umap(tmp_path: Path):
     )
 
     comparison_path = sample_dir / "umap_rna_annotation_method_compare.png"
-    assert comparison_path.exists()
+    assert not comparison_path.exists()
 
     validation = pd.read_csv(sample_dir / "validation_result.csv")
     assert validation.loc[
         validation["check_name"]
-        == "output_presence:umap_rna_annotation_method_compare.png",
-        "passed",
-    ].tolist() == [True]
+        == "output_presence:umap_rna_annotation_method_compare.png"
+    ].empty
 
 
 def test_merge_cli_overrides_preserves_annotation_methods():
