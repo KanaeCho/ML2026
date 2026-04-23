@@ -887,6 +887,7 @@ ensure_tabix_index <- function(fragment_file) {
 option_list <- list(
   make_option(c("--gse"), type = "character", help = "GSE accession"),
   make_option(c("--gsm"), type = "character", help = "GSM accession"),
+  make_option(c("--individual-id"), type = "character", default = "", help = "Individual ID for paired multi-omics linkage"),
   make_option(c("--nmads"), type = "numeric", default = 4, help = "MAD multiplier"),
   make_option(c("--output-profile"), type = "character", default = "full", help = "Output profile: full or matrix-lite"),
   make_option(c("--output-root"), type = "character", default = file.path(project_root, "output"), help = "Output root directory")
@@ -1521,6 +1522,7 @@ ggsave(
 
 meta_data <- atac_obj@meta.data
 metadata_all <- cbind(cell_barcode = rownames(meta_data), meta_data)
+metadata_all$individual_id <- opt$`individual-id`
 metadata_qc <- metadata_all[metadata_all$pass_qc %in% TRUE, , drop = FALSE]
 median_unique_ratio <- if ("unique_ratio" %in% colnames(atac_obj@meta.data)) {
   sprintf("%.2f", median(atac_obj$unique_ratio[atac_obj$pass_qc], na.rm = TRUE))

@@ -21,6 +21,7 @@ class DiscoveredSample:
     supported: bool
     note: str
     source_name: str
+    individual_id: str = ""
     matrix_path: Path | None = None
     barcodes_path: Path | None = None
     features_path: Path | None = None
@@ -58,13 +59,42 @@ def selected_rna_gses(reference_root: Path) -> list[str]:
         assay="scRNA",
         visible_rows_only=True,
     )
-    return sorted({row.gse for row in rows})
+    selected = {row.gse for row in rows}
+
+    co2_manifest = reference_root / "co2_sample_manifest.csv"
+    if co2_manifest.exists():
+        import pandas as pd
+
+        manifest = pd.read_csv(co2_manifest)
+        assay_series = manifest.get("assay", pd.Series(dtype=object)).astype(str)
+        gse_series = manifest.get("gse", pd.Series(dtype=object)).astype(str)
+        selected.update(
+            gse.strip()
+            for gse, assay in zip(gse_series, assay_series, strict=False)
+            if gse.strip() and assay.strip().startswith("RNA")
+        )
+
+    return sorted(selected)
 
 
 def discover_rna_samples(
     raw_root: Path, selected_gses: list[str]
 ) -> list[DiscoveredSample]:
     samples: list[DiscoveredSample] = []
+    individual_map: dict[tuple[str, str], str] = {}
+
+    co2_manifest = ROOT / "data" / "reference" / "co2_sample_manifest.csv"
+    if co2_manifest.exists():
+        import pandas as pd
+
+        manifest = pd.read_csv(co2_manifest)
+        for _, row in manifest.iterrows():
+            gse = str(row.get("gse", "")).strip()
+            gsm = str(row.get("gsm", "")).strip()
+            individual_id = str(row.get("individual_id", "")).strip()
+            assay = str(row.get("assay", "")).strip()
+            if gse and gsm and individual_id and assay.startswith("RNA"):
+                individual_map[(gse, gsm)] = individual_id
 
     for gse in sorted(selected_gses):
         gse_dir = raw_root / gse
@@ -95,6 +125,7 @@ def discover_rna_samples(
                             supported=True,
                             note="10x h5",
                             source_name=path.name,
+                            individual_id=individual_map.get((gse, sample_id), ""),
                             h5_path=path,
                         ),
                     )
@@ -110,6 +141,7 @@ def discover_rna_samples(
                             supported=True,
                             note="matrix tar archive",
                             source_name=path.name,
+                            individual_id=individual_map.get((gse, sample_id), ""),
                             archive_path=path,
                         ),
                     )
@@ -157,17 +189,18 @@ def discover_rna_samples(
                 )
                 supported_by_sample.setdefault(
                     sample_id,
-                    DiscoveredSample(
-                        gse=gse,
-                        sample_id=sample_id,
-                        input_type="triplet",
-                        sample_kind=sample_kind,
-                        supported=True,
-                        note="matrix triplet",
-                        source_name=parts["matrix"].name,
-                        matrix_path=parts["matrix"],
-                        barcodes_path=parts["barcodes"],
-                        features_path=parts["features"],
+                        DiscoveredSample(
+                            gse=gse,
+                            sample_id=sample_id,
+                            input_type="triplet",
+                            sample_kind=sample_kind,
+                            supported=True,
+                            note="matrix triplet",
+                            source_name=parts["matrix"].name,
+                            individual_id=individual_map.get((gse, sample_id), ""),
+                            matrix_path=parts["matrix"],
+                            barcodes_path=parts["barcodes"],
+                            features_path=parts["features"],
                     ),
                 )
 

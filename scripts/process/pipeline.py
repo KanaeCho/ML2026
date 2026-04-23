@@ -63,6 +63,7 @@ class Sample:
     gse: str
     gsm: str
     fragment_file: Path
+    individual_id: str = ""
 
     @property
     def output_dir(self) -> Path:
@@ -131,6 +132,19 @@ def discover_samples(gse: str | None = None) -> list[Sample]:
         else sorted(path for path in RAW_DIR.iterdir() if path.is_dir())
     )
     samples: list[Sample] = []
+    individual_map: dict[tuple[str, str], str] = {}
+    co2_manifest = DATA_ROOT / "reference" / "co2_sample_manifest.csv"
+    if co2_manifest.exists():
+        import pandas as pd
+
+        manifest = pd.read_csv(co2_manifest)
+        for _, row in manifest.iterrows():
+            gse_value = str(row.get("gse", "")).strip()
+            gsm_value = str(row.get("gsm", "")).strip()
+            assay_value = str(row.get("assay", "")).strip()
+            individual_value = str(row.get("individual_id", "")).strip()
+            if gse_value and gsm_value and individual_value and assay_value.startswith("ATAC"):
+                individual_map[(gse_value, gsm_value)] = individual_value
 
     for gse_dir in gse_dirs:
         if not gse_dir.exists():
@@ -150,7 +164,14 @@ def discover_samples(gse: str | None = None) -> list[Sample]:
                 raise RuntimeError(
                     f"Multiple fragment files found for {gse_dir.name}/{gsm}: {names}"
                 )
-            samples.append(Sample(gse=gse_dir.name, gsm=gsm, fragment_file=matches[0]))
+            samples.append(
+                Sample(
+                    gse=gse_dir.name,
+                    gsm=gsm,
+                    fragment_file=matches[0],
+                    individual_id=individual_map.get((gse_dir.name, gsm), ""),
+                )
+            )
 
     return samples
 
@@ -459,6 +480,8 @@ def run_download(
     data_format: str,
     gse: str,
     gsm: str,
+    manifest_csv: str,
+    sheet_name: str,
     file_kinds: str,
     aria2c: str,
     dry_run: bool,
@@ -502,6 +525,10 @@ def run_download(
         command.extend(["--gse", gse])
     if gsm:
         command.extend(["--gsm", gsm])
+    if manifest_csv:
+        command.extend(["--manifest-csv", manifest_csv])
+    if sheet_name:
+        command.extend(["--sheet-name", sheet_name])
 
     if links_out:
         command.extend(["--links-out", links_out])
@@ -643,6 +670,8 @@ def run_sample(
         sample.gse,
         "--gsm",
         sample.gsm,
+        "--individual-id",
+        sample.individual_id,
         "--nmads",
         str(nmads),
         "--output-profile",
@@ -829,6 +858,8 @@ def build_parser() -> argparse.ArgumentParser:
     download_parser = subparsers.add_parser(
         "download", help="Download GEO files based on datasets.xlsx filtering"
     )
+    download_parser.add_argument("--manifest-csv", default="")
+    download_parser.add_argument("--sheet-name", default="")
     download_parser.add_argument("--assay", default="")
     download_parser.add_argument("--data-format", default="")
     download_parser.add_argument("--gse", default="")
@@ -950,6 +981,8 @@ def main() -> int:
             data_format=args.data_format,
             gse=args.gse,
             gsm=args.gsm,
+            manifest_csv=args.manifest_csv,
+            sheet_name=args.sheet_name,
             file_kinds=args.file_kinds,
             aria2c=args.aria2c,
             dry_run=args.dry_run,

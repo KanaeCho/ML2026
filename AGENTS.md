@@ -29,6 +29,10 @@
   - tuning 当前只执行固定 candidate：`baseline__baseline__baseline`
   - 该 candidate 会真实执行单样本主线（读取矩阵、QC、doublet、embedding、Azimuth、样本输出），不是占位 stub
 - `GSE226039` 当前按文件名只保留 `PBMC` 样本参与 RNA 发现与运行，不把 Ileum / Rectum 组织一起纳入本分支主线。
+- 当前已下载 `co2` 共测数据集 `GSE206284` 的 RNA / ATAC 原始文件；其 `data/reference/co2_sample_manifest.csv` 与 `data/reference/co2_rna_atac_pairing.csv` 当前作为共测样本桥表保留 `individual_id`。
+- 当前 `only_rna` 对 `GSE206284` 的 RNA 发现与读入已支持从 `co2_sample_manifest.csv` 注入 `individual_id`，并会写入 RNA `metadata.csv` / `metadata_qc.csv`。
+- 当前 `process_single_sample.R` 已支持 `--individual-id`，`pipeline.py run-sample` 会把 `GSE206284` ATAC 样本的 `individual_id` 传入，并写入 ATAC `metadata.csv` / `metadata_qc.csv`。
+- 当前 `GSE206284` 的 ATAC 原始 `scATAC_prfragments.tar.gz` 已验证内含 `fragments.tsv.gz + .tbi`；现通过解包并补回 `GSM` 前缀后，可被现有 ATAC `discover` / `run-sample` 识别。
 
 ## 目录结构
 

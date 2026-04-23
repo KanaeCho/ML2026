@@ -39,6 +39,7 @@ def _normalize_adata(adata: ad.AnnData, sample: DiscoveredSample) -> ad.AnnData:
     normalized.obs["gse"] = sample.gse
     normalized.obs["sample_id"] = sample.sample_id
     normalized.obs["input_type"] = sample.input_type
+    normalized.obs["individual_id"] = sample.individual_id or ""
     return normalized
 
 

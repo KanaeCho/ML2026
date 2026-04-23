@@ -26,6 +26,7 @@ ASSAY_COL = "测序数据(scATAC/scRNA)"
 FORMAT_COL = "数据格式"
 GSM_COL = "样本名(GSM*)"
 GSE_COL = "数据集(GSE*)"
+INDIVIDUAL_COL = "个体编号"
 DEFAULT_FILE_KINDS = "all"
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -141,7 +142,7 @@ def shared_strings(zip_file: ZipFile) -> list[str]:
 
 
 def parse_xlsx_rows(
-    path: Path, visible_rows_only: bool = False
+    path: Path, visible_rows_only: bool = False, sheet_name: str | None = None
 ) -> list[dict[str, str]]:
     with ZipFile(path) as zip_file:
         workbook = ET.fromstring(zip_file.read("xl/workbook.xml"))
@@ -150,8 +151,18 @@ def parse_xlsx_rows(
         if sheets is None or len(sheets) == 0:
             raise ValueError(f"No sheets found in {path}")
 
-        first_sheet = sheets[0]
-        rel_id = first_sheet.attrib[f"{{{NS_REL}}}id"]
+        selected_sheet = None
+        if sheet_name is None:
+            selected_sheet = sheets[0]
+        else:
+            for sheet in sheets:
+                if normalize_text(sheet.attrib.get("name", "")) == normalize_text(sheet_name):
+                    selected_sheet = sheet
+                    break
+            if selected_sheet is None:
+                raise ValueError(f"Sheet '{sheet_name}' not found in {path}")
+
+        rel_id = selected_sheet.attrib[f"{{{NS_REL}}}id"]
 
         rels_root = ET.fromstring(zip_file.read("xl/_rels/workbook.xml.rels"))
         relmap = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels_root}
@@ -230,10 +241,15 @@ def load_filtered_rows(
     gse: str = "",
     gsm: str = "",
     visible_rows_only: bool = False,
+    sheet_name: str | None = None,
 ) -> list[DatasetRow]:
     assay_filter = normalize_text(assay)
     format_filter = normalize_text(data_format)
-    rows = parse_xlsx_rows(xlsx_path, visible_rows_only=visible_rows_only)
+    rows = parse_xlsx_rows(
+        xlsx_path,
+        visible_rows_only=visible_rows_only,
+        sheet_name=sheet_name,
+    )
     filtered: list[DatasetRow] = []
     for row in rows:
         assay_value = normalize_text(row.get(ASSAY_COL, ""))
@@ -274,6 +290,82 @@ def load_filtered_rows(
             )
         )
     return filtered
+
+
+def load_rows_from_manifest_csv(
+    csv_path: Path,
+    assay: str = "",
+    data_format: str = "",
+    gse: str = "",
+    gsm: str = "",
+) -> list[DatasetRow]:
+    import pandas as pd
+
+    assay_filter = normalize_text(assay)
+    format_filter = normalize_text(data_format)
+    frame = pd.read_csv(csv_path)
+    filtered: list[DatasetRow] = []
+    for _, row in frame.iterrows():
+        raw = {str(k): normalize_text(v) for k, v in row.to_dict().items()}
+        assay_value = normalize_text(raw.get("assay", ""))
+        format_value = normalize_text(raw.get("data_format", ""))
+        gsm_value = normalize_text(raw.get("gsm", ""))
+        gse_value = normalize_text(raw.get("gse", ""))
+
+        if assay_filter and assay_filter.lower() not in assay_value.lower():
+            continue
+        if format_filter and format_filter.lower() not in format_value.lower():
+            continue
+        if not re.fullmatch(r"GSM\d+", gsm_value):
+            continue
+        if not re.fullmatch(r"GSE\d+", gse_value):
+            continue
+
+        item = DatasetRow(
+            gsm=gsm_value,
+            gse=gse_value,
+            assay=assay_value,
+            data_format=format_value,
+            raw=raw,
+        )
+        if gse and item.gse != gse:
+            continue
+        if gsm and item.gsm != gsm:
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def export_co2_manifest(xlsx_path: Path, output_path: Path) -> Path:
+    rows = parse_xlsx_rows(xlsx_path, visible_rows_only=False, sheet_name="co2")
+    manifest_rows: list[dict[str, str]] = []
+    for row in rows:
+        gsm_value = normalize_text(row.get(GSM_COL, ""))
+        gse_value = normalize_text(row.get(GSE_COL, ""))
+        assay_value = normalize_text(row.get(ASSAY_COL, ""))
+        individual_value = normalize_text(row.get(INDIVIDUAL_COL, ""))
+        if not re.fullmatch(r"GSM\d+", gsm_value):
+            continue
+        gse_match = re.search(r"GSE\d+", gse_value)
+        if gse_match is None:
+            continue
+        manifest_rows.append(
+            {
+                "gsm": gsm_value,
+                "gse": gse_match.group(0),
+                "assay": assay_value,
+                "is_pbmc": normalize_text(row.get("是否PBMC", "")),
+                "age": normalize_text(row.get("年龄", "")),
+                "data_format": normalize_text(row.get(FORMAT_COL, "")),
+                "health_status": normalize_text(row.get("健康状态", "")),
+                "individual_id": individual_value,
+            }
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    import pandas as pd
+
+    pd.DataFrame(manifest_rows).to_csv(output_path, index=False)
+    return output_path
 
 
 def listing_url_for_sample(gsm: str) -> str:
@@ -691,6 +783,8 @@ def main() -> int:
         description="Filter datasets.xlsx and download GEO supplementary sample files with aria2c"
     )
     parser.add_argument("--xlsx-path", default=str(DATASETS_XLSX))
+    parser.add_argument("--manifest-csv", default="")
+    parser.add_argument("--sheet-name", default="")
     parser.add_argument("--assay", default="")
     parser.add_argument("--data-format", default="")
     parser.add_argument("--gse", default="")
@@ -715,8 +809,13 @@ def main() -> int:
     args = parser.parse_args()
 
     xlsx_path = Path(args.xlsx_path)
-    if not xlsx_path.exists():
-        raise FileNotFoundError(f"datasets workbook not found: {xlsx_path}")
+    manifest_csv = Path(args.manifest_csv) if args.manifest_csv else None
+    if manifest_csv is not None:
+        if not manifest_csv.exists():
+            raise FileNotFoundError(f"manifest csv not found: {manifest_csv}")
+    else:
+        if not xlsx_path.exists():
+            raise FileNotFoundError(f"datasets workbook not found: {xlsx_path}")
 
     file_kinds = {
         token.strip().lower() for token in args.file_kinds.split(",") if token.strip()
@@ -724,23 +823,36 @@ def main() -> int:
     if not file_kinds:
         raise ValueError("At least one file kind must be requested via --file-kinds")
 
-    rows = load_filtered_rows(
-        xlsx_path,
-        assay=args.assay,
-        data_format=args.data_format,
-        gse=args.gse,
-        gsm=args.gsm,
-        visible_rows_only=not args.include_hidden_rows,
-    )
-    print(f"Workbook: {xlsx_path}")
-    print(
-        "Workbook row selection: "
-        + (
-            "all rows (including hidden)"
-            if args.include_hidden_rows
-            else "visible rows only"
+    if manifest_csv is not None:
+        rows = load_rows_from_manifest_csv(
+            manifest_csv,
+            assay=args.assay,
+            data_format=args.data_format,
+            gse=args.gse,
+            gsm=args.gsm,
         )
-    )
+        print(f"Manifest CSV: {manifest_csv}")
+    else:
+        rows = load_filtered_rows(
+            xlsx_path,
+            assay=args.assay,
+            data_format=args.data_format,
+            gse=args.gse,
+            gsm=args.gsm,
+            visible_rows_only=not args.include_hidden_rows,
+            sheet_name=args.sheet_name or None,
+        )
+        print(f"Workbook: {xlsx_path}")
+        print(
+            "Workbook row selection: "
+            + (
+                "all rows (including hidden)"
+                if args.include_hidden_rows
+                else "visible rows only"
+            )
+        )
+        if args.sheet_name:
+            print(f"Workbook sheet: {args.sheet_name}")
     assay_label = repr(args.assay) if args.assay else "any"
     format_label = repr(args.data_format) if args.data_format else "any"
     print(f"Filter: assay contains {assay_label}, data_format contains {format_label}")
