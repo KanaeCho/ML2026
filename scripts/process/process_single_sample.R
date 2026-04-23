@@ -1381,16 +1381,18 @@ if (length(qc_cells) >= 3) {
       stringsAsFactors = FALSE,
       row.names = rownames(umap_embeddings)
     )
-    l1_consensus <- build_l1_cluster_consensus(query_umap_df$cima_cell_type_l1, query_umap_df$seurat_clusters)
-    query_umap_df$cima_cell_type_l1_cluster_consensus <- l1_consensus$label
-    query_umap_df$cima_l1_cluster_purity <- l1_consensus$purity
+    # Use per-cell masked labels directly for query-native ATAC visualization.
+    # Cluster-level consensus tends to over-collapse mixed ATAC neighborhoods,
+    # which hides real per-cell heterogeneity compared with paired RNA labels.
+    query_umap_df$cima_cell_type_l1_cluster_consensus <- query_umap_df$cima_cell_type_l1_masked
+    query_umap_df$cima_l1_cluster_purity <- NA_real_
     atac_obj@meta.data[query_umap_df$cell_barcode, "cima_cell_type_l1_cluster_consensus"] <- query_umap_df$cima_cell_type_l1_cluster_consensus
     atac_obj@meta.data[query_umap_df$cell_barcode, "cima_l1_cluster_purity"] <- query_umap_df$cima_l1_cluster_purity
     save_query_umap_plot(query_umap_df, "seurat_clusters", umap_cluster_file, paste0(opt$gsm, " UMAP by ATAC cluster"))
     save_cima_umap_plot(query_umap_df, "cima_cell_type_l1", cima_palettes$cima_cell_type_l1, umap_l1_query_file, paste0(opt$gsm, " query-native UMAP by CIMA L1"))
     l1_masked_palette <- c(cima_palettes$cima_cell_type_l1, Unknown = "#7F7F7F")
     save_cima_umap_plot(query_umap_df, "cima_cell_type_l1_masked", l1_masked_palette, umap_l1_query_masked_file, paste0(opt$gsm, " query-native UMAP by CIMA L1 (masked)"))
-    save_cima_umap_plot(query_umap_df, "cima_cell_type_l1_cluster_consensus", l1_masked_palette, umap_l1_query_consensus_file, paste0(opt$gsm, " query-native UMAP by CIMA L1 (cluster consensus)"))
+    save_cima_umap_plot(query_umap_df, "cima_cell_type_l1_cluster_consensus", l1_masked_palette, umap_l1_query_consensus_file, paste0(opt$gsm, " query-native UMAP by CIMA L1 (pointwise masked)"))
     umap_plot_df <- query_umap_df
   }
 
