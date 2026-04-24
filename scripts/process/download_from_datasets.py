@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 from zipfile import ZipFile
 from xml.etree import ElementTree as ET
 
@@ -25,10 +26,15 @@ ASSAY_COL = "测序数据(scATAC/scRNA)"
 FORMAT_COL = "数据格式"
 GSM_COL = "样本名(GSM*)"
 GSE_COL = "数据集(GSE*)"
+INDIVIDUAL_COL = "个体编号"
+DEFAULT_FILE_KINDS = "all"
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 DEFAULT_NETWORK_TIMEOUT = 10
 USER_AGENT = "ML2026-downloader/1.0"
+CHECKSUM_SUFFIXES = (".md5", ".md5sum", ".sha1", ".sha256")
+TEXT_MATRIX_SUFFIXES = (".mtx", ".mtx.gz", ".tsv", ".tsv.gz", ".csv", ".csv.gz")
+ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".zip", ".zip.gz")
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,25 @@ class LocalSampleInventory:
     has_tbi: bool
 
 
+class SummaryStats(TypedDict):
+    filtered_rows: int
+    unique_gse: int
+    gse_counts: dict[str, int]
+    local_existing_samples: int
+    local_existing_files: int
+    local_fragment_samples: int
+    local_barcode_samples: int
+    local_tbi_samples: int
+    resolved_files: int
+    existing_files: int
+    partial_files: int
+    files_to_download: int
+    known_total_bytes: int
+    remaining_bytes: int
+    missing_size_files: int
+    free_bytes: int
+
+
 class HrefParser(html.parser.HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -116,7 +141,9 @@ def shared_strings(zip_file: ZipFile) -> list[str]:
     return strings
 
 
-def parse_xlsx_rows(path: Path) -> list[dict[str, str]]:
+def parse_xlsx_rows(
+    path: Path, visible_rows_only: bool = False, sheet_name: str | None = None
+) -> list[dict[str, str]]:
     with ZipFile(path) as zip_file:
         workbook = ET.fromstring(zip_file.read("xl/workbook.xml"))
         ns = {"a": NS_MAIN, "r": NS_REL}
@@ -124,8 +151,18 @@ def parse_xlsx_rows(path: Path) -> list[dict[str, str]]:
         if sheets is None or len(sheets) == 0:
             raise ValueError(f"No sheets found in {path}")
 
-        first_sheet = sheets[0]
-        rel_id = first_sheet.attrib[f"{{{NS_REL}}}id"]
+        selected_sheet = None
+        if sheet_name is None:
+            selected_sheet = sheets[0]
+        else:
+            for sheet in sheets:
+                if normalize_text(sheet.attrib.get("name", "")) == normalize_text(sheet_name):
+                    selected_sheet = sheet
+                    break
+            if selected_sheet is None:
+                raise ValueError(f"Sheet '{sheet_name}' not found in {path}")
+
+        rel_id = selected_sheet.attrib[f"{{{NS_REL}}}id"]
 
         rels_root = ET.fromstring(zip_file.read("xl/_rels/workbook.xml.rels"))
         relmap = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels_root}
@@ -158,6 +195,13 @@ def parse_xlsx_rows(path: Path) -> list[dict[str, str]]:
             return rows
 
         for row in sheet_data.findall("a:row", ns):
+            row_number = int(row.attrib.get("r", "0"))
+            if (
+                visible_rows_only
+                and row_number != 1
+                and row.attrib.get("hidden") == "1"
+            ):
+                continue
             values: dict[str, str] = {}
             for cell in row.findall("a:c", ns):
                 ref = cell.attrib["r"]
@@ -175,7 +219,9 @@ def parse_xlsx_rows(path: Path) -> list[dict[str, str]]:
     if not rows:
         return []
 
-    header_map = {col: name for col, name in rows[0].items() if not col.endswith("_hyperlink")}
+    header_map = {
+        col: name for col, name in rows[0].items() if not col.endswith("_hyperlink")
+    }
     normalized: list[dict[str, str]] = []
     for row in rows[1:]:
         item: dict[str, str] = {}
@@ -190,12 +236,20 @@ def parse_xlsx_rows(path: Path) -> list[dict[str, str]]:
 
 def load_filtered_rows(
     xlsx_path: Path,
-    assay: str,
-    data_format: str,
+    assay: str = "",
+    data_format: str = "",
     gse: str = "",
     gsm: str = "",
+    visible_rows_only: bool = False,
+    sheet_name: str | None = None,
 ) -> list[DatasetRow]:
-    rows = parse_xlsx_rows(xlsx_path)
+    assay_filter = normalize_text(assay)
+    format_filter = normalize_text(data_format)
+    rows = parse_xlsx_rows(
+        xlsx_path,
+        visible_rows_only=visible_rows_only,
+        sheet_name=sheet_name,
+    )
     filtered: list[DatasetRow] = []
     for row in rows:
         assay_value = normalize_text(row.get(ASSAY_COL, ""))
@@ -204,9 +258,9 @@ def load_filtered_rows(
         gse_value = normalize_text(row.get(GSE_COL, ""))
         gse_match = re.search(r"GSE\d+", gse_value)
 
-        if assay_value != assay:
+        if assay_filter and assay_filter.lower() not in assay_value.lower():
             continue
-        if data_format.lower() not in format_value.lower():
+        if format_filter and format_filter.lower() not in format_value.lower():
             continue
         if not re.fullmatch(r"GSM\d+", gsm_value):
             continue
@@ -238,16 +292,98 @@ def load_filtered_rows(
     return filtered
 
 
+def load_rows_from_manifest_csv(
+    csv_path: Path,
+    assay: str = "",
+    data_format: str = "",
+    gse: str = "",
+    gsm: str = "",
+) -> list[DatasetRow]:
+    import pandas as pd
+
+    assay_filter = normalize_text(assay)
+    format_filter = normalize_text(data_format)
+    frame = pd.read_csv(csv_path)
+    filtered: list[DatasetRow] = []
+    for _, row in frame.iterrows():
+        raw = {str(k): normalize_text(v) for k, v in row.to_dict().items()}
+        assay_value = normalize_text(raw.get("assay", ""))
+        format_value = normalize_text(raw.get("data_format", ""))
+        gsm_value = normalize_text(raw.get("gsm", ""))
+        gse_value = normalize_text(raw.get("gse", ""))
+
+        if assay_filter and assay_filter.lower() not in assay_value.lower():
+            continue
+        if format_filter and format_filter.lower() not in format_value.lower():
+            continue
+        if not re.fullmatch(r"GSM\d+", gsm_value):
+            continue
+        if not re.fullmatch(r"GSE\d+", gse_value):
+            continue
+
+        item = DatasetRow(
+            gsm=gsm_value,
+            gse=gse_value,
+            assay=assay_value,
+            data_format=format_value,
+            raw=raw,
+        )
+        if gse and item.gse != gse:
+            continue
+        if gsm and item.gsm != gsm:
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def export_co2_manifest(xlsx_path: Path, output_path: Path) -> Path:
+    rows = parse_xlsx_rows(xlsx_path, visible_rows_only=False, sheet_name="co2")
+    manifest_rows: list[dict[str, str]] = []
+    for row in rows:
+        gsm_value = normalize_text(row.get(GSM_COL, ""))
+        gse_value = normalize_text(row.get(GSE_COL, ""))
+        assay_value = normalize_text(row.get(ASSAY_COL, ""))
+        individual_value = normalize_text(row.get(INDIVIDUAL_COL, ""))
+        if not re.fullmatch(r"GSM\d+", gsm_value):
+            continue
+        gse_match = re.search(r"GSE\d+", gse_value)
+        if gse_match is None:
+            continue
+        manifest_rows.append(
+            {
+                "gsm": gsm_value,
+                "gse": gse_match.group(0),
+                "assay": assay_value,
+                "is_pbmc": normalize_text(row.get("是否PBMC", "")),
+                "age": normalize_text(row.get("年龄", "")),
+                "data_format": normalize_text(row.get(FORMAT_COL, "")),
+                "health_status": normalize_text(row.get("健康状态", "")),
+                "individual_id": individual_value,
+            }
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    import pandas as pd
+
+    pd.DataFrame(manifest_rows).to_csv(output_path, index=False)
+    return output_path
+
+
 def listing_url_for_sample(gsm: str) -> str:
-    return f"https://ftp.ncbi.nlm.nih.gov/geo/samples/{bucket_accession(gsm)}/{gsm}/suppl/"
+    return (
+        f"https://ftp.ncbi.nlm.nih.gov/geo/samples/{bucket_accession(gsm)}/{gsm}/suppl/"
+    )
 
 
 def listing_url_for_series(gse: str) -> str:
-    return f"https://ftp.ncbi.nlm.nih.gov/geo/series/{bucket_accession(gse)}/{gse}/suppl/"
+    return (
+        f"https://ftp.ncbi.nlm.nih.gov/geo/series/{bucket_accession(gse)}/{gse}/suppl/"
+    )
 
 
 def urlopen_with_headers(url: str, timeout: int, method: str = "GET"):
-    request = urllib.request.Request(url, method=method, headers={"User-Agent": USER_AGENT})
+    request = urllib.request.Request(
+        url, method=method, headers={"User-Agent": USER_AGENT}
+    )
     return urllib.request.urlopen(request, timeout=timeout)
 
 
@@ -264,21 +400,96 @@ def fetch_listing(url: str, timeout: int = DEFAULT_NETWORK_TIMEOUT) -> list[str]
     return sorted(set(items))
 
 
+def is_count_matrix_row(row: DatasetRow) -> bool:
+    lower = row.data_format.lower()
+    return "计数矩阵" in lower or "count matrix" in lower
+
+
+def is_checksum_file(filename: str) -> bool:
+    return filename.endswith(CHECKSUM_SUFFIXES)
+
+
+def is_count_matrix_bundle_file(
+    filename: str, *, allow_series_archive: bool = False
+) -> bool:
+    lower = filename.lower()
+    if is_checksum_file(lower):
+        return False
+
+    if any(
+        token in lower for token in ("barcode", "feature", "gene")
+    ) and lower.endswith(TEXT_MATRIX_SUFFIXES):
+        return True
+
+    if "matrix" in lower and lower.endswith(TEXT_MATRIX_SUFFIXES + ARCHIVE_SUFFIXES):
+        return True
+
+    if "feature_bc_matrix" in lower and lower.endswith(
+        (".h5", ".h5.gz") + ARCHIVE_SUFFIXES
+    ):
+        return True
+
+    if allow_series_archive and "raw" in lower and lower.endswith(ARCHIVE_SUFFIXES):
+        return True
+
+    return False
+
+
 def file_matches_sample(gsm: str, filename: str, file_kinds: set[str]) -> bool:
     lower = filename.lower()
     if not lower.startswith(gsm.lower()):
         return False
+    if is_checksum_file(lower):
+        return False
+    if "all" in file_kinds:
+        return True
+    if "count-matrix" in file_kinds and is_count_matrix_bundle_file(filename):
+        return True
     if "fragment" in file_kinds and "fragment" in lower and not lower.endswith(".tbi"):
         return True
     if "fragment" in file_kinds and lower.endswith(".tbi") and "fragment" in lower:
         return True
     if "barcode" in file_kinds and "barcode" in lower:
         return True
-    if "singlecell" in file_kinds and "singlecell" in lower and lower.endswith(".csv.gz"):
+    if (
+        "singlecell" in file_kinds
+        and "singlecell" in lower
+        and lower.endswith(".csv.gz")
+    ):
         return True
     if "summary" in file_kinds and "summary" in lower and lower.endswith(".csv.gz"):
         return True
+    if "h5" in file_kinds and lower.endswith(".h5"):
+        return True
+    if "metadata" in file_kinds and "metadata" in lower and lower.endswith(".csv.gz"):
+        return True
     return False
+
+
+def series_level_count_matrix_matches(
+    row: DatasetRow, filenames: list[str], file_kinds: set[str]
+) -> list[str]:
+    if "all" not in file_kinds and "count-matrix" not in file_kinds:
+        return []
+    if not is_count_matrix_row(row):
+        return []
+
+    prefix = row.gse.lower()
+    direct = [
+        name
+        for name in filenames
+        if name.lower().startswith(prefix)
+        and is_count_matrix_bundle_file(name, allow_series_archive=False)
+    ]
+    if direct:
+        return direct
+
+    return [
+        name
+        for name in filenames
+        if name.lower().startswith(prefix)
+        and is_count_matrix_bundle_file(name, allow_series_archive=True)
+    ]
 
 
 def remote_file_size(url: str, timeout: int = DEFAULT_NETWORK_TIMEOUT) -> int | None:
@@ -299,16 +510,22 @@ def scan_local_inventory(rows: list[DatasetRow]) -> list[LocalSampleInventory]:
     inventory: list[LocalSampleInventory] = []
     for row in rows:
         gse_dir = RAW_DIR / row.gse
-        matches = tuple(sorted(path for path in gse_dir.glob(f"{row.gsm}_*") if path.is_file()))
+        matches = tuple(
+            sorted(path for path in gse_dir.glob(f"{row.gsm}_*") if path.is_file())
+        )
         names = [path.name.lower() for path in matches]
         inventory.append(
             LocalSampleInventory(
                 gsm=row.gsm,
                 gse=row.gse,
                 files=matches,
-                has_fragment=any("fragment" in name and not name.endswith(".tbi") for name in names),
+                has_fragment=any(
+                    "fragment" in name and not name.endswith(".tbi") for name in names
+                ),
                 has_barcode=any("barcode" in name for name in names),
-                has_tbi=any(name.endswith(".tbi") and "fragment" in name for name in names),
+                has_tbi=any(
+                    name.endswith(".tbi") and "fragment" in name for name in names
+                ),
             )
         )
     return inventory
@@ -341,23 +558,27 @@ def resolve_remote_files(
     total_rows = len(rows)
     for index, row in enumerate(rows, start=1):
         print(f"[resolve] {index}/{total_rows} {row.gse}/{row.gsm}")
-        candidates: list[tuple[str, list[str]]] = []
+        candidates: list[tuple[str, str, list[str]]] = []
         local_errors: list[str] = []
         sample_url = listing_url_for_sample(row.gsm)
         sample_listing, sample_error = get_listing(sample_url, "sample")
-        candidates.append((sample_url, sample_listing))
+        candidates.append(("sample", sample_url, sample_listing))
         if sample_error:
             local_errors.append(sample_error)
 
         series_url = listing_url_for_series(row.gse)
         series_listing, series_error = get_listing(series_url, "series")
-        candidates.append((series_url, series_listing))
+        candidates.append(("series", series_url, series_listing))
         if series_error:
             local_errors.append(series_error)
 
         picked: list[RemoteFile] = []
-        for base_url, files in candidates:
-            matched = [name for name in files if file_matches_sample(row.gsm, name, file_kinds)]
+        for scope, base_url, files in candidates:
+            matched = [
+                name for name in files if file_matches_sample(row.gsm, name, file_kinds)
+            ]
+            if not matched and scope == "series":
+                matched = series_level_count_matrix_matches(row, files, file_kinds)
             if not matched:
                 continue
             for name in matched:
@@ -378,14 +599,16 @@ def resolve_remote_files(
         if not picked:
             detail = "; ".join(local_errors) if local_errors else "no matching files"
             requested = ",".join(sorted(file_kinds))
-            problems.append(f"{row.gsm}: no requested files ({requested}) found in GEO supplementary listings ({detail})")
+            problems.append(
+                f"{row.gsm}: no requested files ({requested}) found in GEO supplementary listings ({detail})"
+            )
             continue
 
         resolved.extend(picked)
 
-    deduped: dict[tuple[str, str], RemoteFile] = {}
+    deduped: dict[Path, RemoteFile] = {}
     for item in resolved:
-        deduped[(item.gsm, item.filename)] = item
+        deduped.setdefault(item.target_path, item)
     return list(deduped.values()), problems
 
 
@@ -425,7 +648,7 @@ def summarize(
     rows: list[DatasetRow],
     remote_files: list[RemoteFile],
     local_inventory: list[LocalSampleInventory],
-) -> dict[str, object]:
+) -> SummaryStats:
     gse_counts: dict[str, int] = {}
     for row in rows:
         gse_counts[row.gse] = gse_counts.get(row.gse, 0) + 1
@@ -436,7 +659,9 @@ def summarize(
     local_barcode_count = sum(1 for item in local_inventory if item.has_barcode)
     local_tbi_count = sum(1 for item in local_inventory if item.has_tbi)
 
-    total_known_bytes = sum(item.size_bytes for item in remote_files if item.size_bytes is not None)
+    total_known_bytes = sum(
+        item.size_bytes for item in remote_files if item.size_bytes is not None
+    )
     missing_sizes = sum(1 for item in remote_files if item.size_bytes is None)
 
     to_download = []
@@ -458,7 +683,11 @@ def summarize(
         if item.size_bytes is not None:
             remaining_bytes += item.size_bytes
 
-    free_bytes = shutil.disk_usage(RAW_DIR).free if RAW_DIR.exists() else shutil.disk_usage(ROOT).free
+    free_bytes = (
+        shutil.disk_usage(RAW_DIR).free
+        if RAW_DIR.exists()
+        else shutil.disk_usage(ROOT).free
+    )
 
     return {
         "filtered_rows": len(rows),
@@ -481,7 +710,9 @@ def summarize(
 
 
 def build_aria2_manifest(remote_files: list[RemoteFile]) -> Path:
-    tmp = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, prefix="geo-download-", suffix=".txt")
+    tmp = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", delete=False, prefix="geo-download-", suffix=".txt"
+    )
     manifest_path = Path(tmp.name)
     with tmp:
         for item in remote_files:
@@ -500,7 +731,9 @@ def write_links_manifest(remote_files: list[RemoteFile], output_path: Path) -> N
         handle.write("gse\tgsm\tfilename\tsize_bytes\turl\n")
         for item in sorted(remote_files, key=lambda x: (x.gse, x.gsm, x.filename)):
             size_text = "" if item.size_bytes is None else str(item.size_bytes)
-            handle.write(f"{item.gse}\t{item.gsm}\t{item.filename}\t{size_text}\t{item.url}\n")
+            handle.write(
+                f"{item.gse}\t{item.gsm}\t{item.filename}\t{size_text}\t{item.url}\n"
+            )
 
 
 def print_links(remote_files: list[RemoteFile]) -> None:
@@ -508,7 +741,9 @@ def print_links(remote_files: list[RemoteFile]) -> None:
         print(f"{item.gse}\t{item.gsm}\t{item.filename}\t{item.url}")
 
 
-def run_aria2c(aria2c_bin: str, manifest_path: Path, max_concurrent_downloads: int, split: int) -> int:
+def run_aria2c(
+    aria2c_bin: str, manifest_path: Path, max_concurrent_downloads: int, split: int
+) -> int:
     command = [
         aria2c_bin,
         "--continue=true",
@@ -523,7 +758,7 @@ def run_aria2c(aria2c_bin: str, manifest_path: Path, max_concurrent_downloads: i
     return subprocess.call(command, cwd=ROOT)
 
 
-def print_summary(summary: dict[str, object]) -> None:
+def print_summary(summary: SummaryStats) -> None:
     print(f"Filtered rows: {summary['filtered_rows']}")
     print(f"Unique GSE: {summary['unique_gse']}")
     for gse, count in sorted(summary["gse_counts"].items()):
@@ -544,15 +779,27 @@ def print_summary(summary: dict[str, object]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Filter datasets.xlsx and download GEO fragment/barcode files with aria2c")
+    parser = argparse.ArgumentParser(
+        description="Filter datasets.xlsx and download GEO supplementary sample files with aria2c"
+    )
     parser.add_argument("--xlsx-path", default=str(DATASETS_XLSX))
-    parser.add_argument("--assay", default="scATAC")
-    parser.add_argument("--data-format", default="fragment")
+    parser.add_argument("--manifest-csv", default="")
+    parser.add_argument("--sheet-name", default="")
+    parser.add_argument("--assay", default="")
+    parser.add_argument("--data-format", default="")
     parser.add_argument("--gse", default="")
     parser.add_argument("--gsm", default="")
-    parser.add_argument("--file-kinds", default="fragment,barcode")
+    parser.add_argument(
+        "--file-kinds",
+        default=DEFAULT_FILE_KINDS,
+        help=(
+            "Comma-separated kinds: all, count-matrix, fragment, barcode, singlecell, "
+            "summary, h5, metadata"
+        ),
+    )
     parser.add_argument("--aria2c", default="aria2c")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--include-hidden-rows", action="store_true")
     parser.add_argument("--skip-network-resolve", action="store_true")
     parser.add_argument("--max-concurrent-downloads", type=int, default=4)
     parser.add_argument("--split", type=int, default=8)
@@ -562,26 +809,53 @@ def main() -> int:
     args = parser.parse_args()
 
     xlsx_path = Path(args.xlsx_path)
-    if not xlsx_path.exists():
-        raise FileNotFoundError(f"datasets workbook not found: {xlsx_path}")
+    manifest_csv = Path(args.manifest_csv) if args.manifest_csv else None
+    if manifest_csv is not None:
+        if not manifest_csv.exists():
+            raise FileNotFoundError(f"manifest csv not found: {manifest_csv}")
+    else:
+        if not xlsx_path.exists():
+            raise FileNotFoundError(f"datasets workbook not found: {xlsx_path}")
 
     file_kinds = {
-        token.strip().lower()
-        for token in args.file_kinds.split(",")
-        if token.strip()
+        token.strip().lower() for token in args.file_kinds.split(",") if token.strip()
     }
     if not file_kinds:
         raise ValueError("At least one file kind must be requested via --file-kinds")
 
-    rows = load_filtered_rows(
-        xlsx_path,
-        assay=args.assay,
-        data_format=args.data_format,
-        gse=args.gse,
-        gsm=args.gsm,
-    )
-    print(f"Workbook: {xlsx_path}")
-    print(f"Filter: assay={args.assay!r}, data_format contains {args.data_format!r}")
+    if manifest_csv is not None:
+        rows = load_rows_from_manifest_csv(
+            manifest_csv,
+            assay=args.assay,
+            data_format=args.data_format,
+            gse=args.gse,
+            gsm=args.gsm,
+        )
+        print(f"Manifest CSV: {manifest_csv}")
+    else:
+        rows = load_filtered_rows(
+            xlsx_path,
+            assay=args.assay,
+            data_format=args.data_format,
+            gse=args.gse,
+            gsm=args.gsm,
+            visible_rows_only=not args.include_hidden_rows,
+            sheet_name=args.sheet_name or None,
+        )
+        print(f"Workbook: {xlsx_path}")
+        print(
+            "Workbook row selection: "
+            + (
+                "all rows (including hidden)"
+                if args.include_hidden_rows
+                else "visible rows only"
+            )
+        )
+        if args.sheet_name:
+            print(f"Workbook sheet: {args.sheet_name}")
+    assay_label = repr(args.assay) if args.assay else "any"
+    format_label = repr(args.data_format) if args.data_format else "any"
+    print(f"Filter: assay contains {assay_label}, data_format contains {format_label}")
     if args.gse:
         print(f"GSE filter: {args.gse}")
     if args.gsm:
@@ -595,29 +869,41 @@ def main() -> int:
     local_inventory = scan_local_inventory(rows)
 
     if args.skip_network_resolve:
-        summary = {
+        summary: SummaryStats = {
             "filtered_rows": len(rows),
             "unique_gse": len({row.gse for row in rows}),
-            "gse_counts": {gse: sum(1 for row in rows if row.gse == gse) for gse in sorted({row.gse for row in rows})},
+            "gse_counts": {
+                gse: sum(1 for row in rows if row.gse == gse)
+                for gse in sorted({row.gse for row in rows})
+            },
             "local_existing_samples": sum(1 for item in local_inventory if item.files),
             "local_existing_files": sum(len(item.files) for item in local_inventory),
-            "local_fragment_samples": sum(1 for item in local_inventory if item.has_fragment),
-            "local_barcode_samples": sum(1 for item in local_inventory if item.has_barcode),
+            "local_fragment_samples": sum(
+                1 for item in local_inventory if item.has_fragment
+            ),
+            "local_barcode_samples": sum(
+                1 for item in local_inventory if item.has_barcode
+            ),
             "local_tbi_samples": sum(1 for item in local_inventory if item.has_tbi),
             "resolved_files": 0,
             "existing_files": 0,
+            "partial_files": 0,
             "files_to_download": 0,
             "known_total_bytes": 0,
             "remaining_bytes": 0,
             "missing_size_files": 0,
-            "free_bytes": shutil.disk_usage(RAW_DIR).free if RAW_DIR.exists() else shutil.disk_usage(ROOT).free,
+            "free_bytes": shutil.disk_usage(RAW_DIR).free
+            if RAW_DIR.exists()
+            else shutil.disk_usage(ROOT).free,
         }
         print_summary(summary)
         print("Skipped remote resolution")
         return 0
 
     print(f"Network timeout per request: {args.network_timeout}s")
-    remote_files, problems = resolve_remote_files(rows, timeout=args.network_timeout, file_kinds=file_kinds)
+    remote_files, problems = resolve_remote_files(
+        rows, timeout=args.network_timeout, file_kinds=file_kinds
+    )
     summary = summarize(rows, remote_files, local_inventory)
     print_summary(summary)
 

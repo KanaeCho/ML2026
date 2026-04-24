@@ -1,8 +1,0 @@
-{
-  "source_h5ad": "/mnt/f/ydd/ML2026/data/reference/cima/CIMA_ATAC_3762242cells_338036peaks_compressed.h5ad",
-  "per_l4": 100,
-  "n_reference_cells": 6222,
-  "top_features": 12000,
-  "components": 31,
-  "seed": 42
-}

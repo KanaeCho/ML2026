@@ -1,270 +1,295 @@
 # ML2026 项目说明
 
 ## 项目定位
-本分支当前聚焦单样本 scATAC-seq 流程，不再以多样本整合作为主目标。
+当前分支聚焦 **单样本 scRNA-seq** 主线。
 
-本分支当前验收目标只有两项：
+本分支第一阶段验收目标：
 
-1. 对 `GSE190992` 和 `GSE283744` 的全部样本统一对齐到 `data/reference/peak.bed`，逐样本独立完成质控。
-2. 为每个样本输出 QC 图、矩阵结果和 4 张 UMAP 图；UMAP 分别按 CIMA transfer 得到的 `cell_type_l1`、`cell_type_l2`、`cell_type_l3`、`cell_type_l4` 上色，并使用统一颜色体系。
+1. 对 `datasets.xlsx` 中已筛选、且原始计数矩阵已下载到本地的数据，逐样本完成 RNA `QC + 聚类 + CIMA RNA L1/L2 注释 + UMAP 可视化`。
+2. 在当前主线上，保留一个 **baseline-only tuning 工作流**，用于以固定 `baseline__baseline__baseline` 参数执行单样本 RNA 主线，并输出可复核的单 candidate 审计产物。
+3. 重点保证 `L1 + L2` 的 celltype UMAP 质量可读，并同时输出可复核的简单审计指标。
 
 补充说明：
-- 当前 R / Signac 流程内部继续以 peak x cell 计数矩阵为主。
-- `data/reference/peak.bed` 是两个数据集全部样本共用的 reference peak 集，不在样本之间混用不同 peak 定义。
-- 多样本整合相关旧脚本已从本分支移除，不作为当前维护对象。
+- 当前以 **单样本** 为主，不把跨样本 RNA 整合作为第一阶段验收目标。
+- CIMA RNA 注释是当前主线；marker-based 注释目前不作为主流程必需产物。
+- 仓库中的 ATAC / TEA-seq 流程继续保留，但在本分支降级为非主线维护对象。
 
 ## 当前状态
-- 当前数据集仍为 2 个 GSE，共 28 个 GSM：`GSE190992` 和 `GSE283744`。
-- `process_single_sample.R` 已确认使用 `data/reference/peak.bed` 构建单样本 peak x cell 矩阵，并在 QC 后生成 query-native ATAC UMAP 坐标、reference-projected CIMA UMAP 图以及 CIMA L1-L4 注释结果。
-- 当前单样本主流程支持两种输出模式：默认 `full` 输出完整矩阵 / metadata / RDS；`matrix-lite` 输出面向外部验证的精简矩阵与一个 CIMA L1 UMAP。
-- CIMA scATAC reference 已确认来自 `data/reference/cima/CIMA_ATAC_3762242cells_338036peaks_compressed.h5ad`。
-- 该参考的 AnnData `obs` 已确认包含逐细胞 `cell_type_l1`、`cell_type_l2`、`cell_type_l3`、`cell_type_l4`。
-- 当前分支运行时保留的 CIMA 资产只有：上述 `.h5ad`、`data/reference/cima/cima_atac_celltype_hierarchy.csv`、`data/reference/cima/cima_atac_reference_lsi_features.tsv.gz`、`data/reference/cima/cima_atac_reference_l1_centroids.tsv`、`data/reference/cima/cima_atac_reference_l2_centroids.tsv`、`data/reference/cima/cima_atac_reference_l3_centroids.tsv`、`data/reference/cima/cima_atac_reference_l4_centroids.tsv`、`data/reference/cima/cima_atac_reference_model.json`、`data/reference/cima/README.md`。
+- 当前工作区默认通过外部数据根读取数据：优先 `./data`，否则读取环境变量 `ML2026_DATA_ROOT`，再否则回退到 `/mnt/g/ML2026_data`。
+- 当前工作区中的 `output/` 是软链接，实际指向 `/mnt/g/ML2026_output`。
+- `pipeline.py discover-rna` 当前可识别 10 个已筛选 RNA GSE，共 55 个样本条目，其中 54 个可直接运行，1 个当前仅记为不支持：
+  - 支持：`GSE149689`、`GSE157007`、`GSE167363`、`GSE192391`、`GSE198891`、`GSE213516`、`GSE226039`、`GSE231794`、`GSE268936`
+  - 不支持：`GSE198533` 的共享 `gene_counts_matrix.csv.gz`，当前不按单细胞矩阵处理
+- 已验证的 RNA smoke sample：
+  - `GSE167363/GSM5102900`
+  - 成功输出 `metadata.csv`、`metadata_qc.csv`、`qc_summary.csv`、`validation_result.csv`、`qc_overview.png`、`umap_rna_pbmcref_vs_cima_l1.png`、矩阵导出、`run_status.json` 和 `GSM5102900.h5ad`
+- 当前主线默认 QC 已切换到更严格的一档：`counts_lower_nmads=2.5`、`genes_lower_nmads=2.5`、`pct_mt_upper_nmads=2.5`、`pct_ribo_upper_nmads=3.5`
+- 当前代码中的 baseline-only tuning 路径已经落地：
+  - `pipeline.py` / `scripts.only_rna.cli` 已支持 `tune-rna-sample` 与 `tune-rna-gse`
+  - tuning 当前只执行固定 candidate：`baseline__baseline__baseline`
+  - 该 candidate 会真实执行单样本主线（读取矩阵、QC、doublet、embedding、Azimuth、样本输出），不是占位 stub
+- `GSE226039` 当前按文件名只保留 `PBMC` 样本参与 RNA 发现与运行，不把 Ileum / Rectum 组织一起纳入本分支主线。
+- 当前已下载 `co2` 共测数据集 `GSE206284` 的 RNA / ATAC 原始文件；其 `data/reference/co2_sample_manifest.csv` 与 `data/reference/co2_rna_atac_pairing.csv` 当前作为共测样本桥表保留 `individual_id`。
+- 当前 `only_rna` 对 `GSE206284` 的 RNA 发现与读入已支持从 `co2_sample_manifest.csv` 注入 `individual_id`，并会写入 RNA `metadata.csv` / `metadata_qc.csv`。
+- 当前 `process_single_sample.R` 已支持 `--individual-id`，`pipeline.py run-sample` 会把 `GSE206284` ATAC 样本的 `individual_id` 传入，并写入 ATAC `metadata.csv` / `metadata_qc.csv`。
+- 当前 `GSE206284` 的 ATAC 原始 `scATAC_prfragments.tar.gz` 已验证内含 `fragments.tsv.gz + .tbi`；现通过解包并补回 `GSM` 前缀后，可被现有 ATAC `discover` / `run-sample` 识别。
 
 ## 目录结构
 
 ### `data/`
-原始数据和共享参考文件。
+- 当前仓库内通常不存在真实 `data/` 目录；运行时数据默认来自外部数据根。
+- 共享参考位于 `data_root/reference/`，原始 RNA 输入位于 `data_root/raw/`。
 
-#### `data/reference/`
-- `datasets.xlsx`: 数据集统计表。
-- `peak.bed`: 两个 GSE 全部样本统一使用的 peak 定义文件。
-- `peaks.csv`: 带 peak_id 的参考索引文件。
+### `data_root/reference/`
+- `datasets.xlsx`
+  - RNA 样本发现基于 Excel 第一张表中当前可见、且 `assay=scRNA` 的行。
+- `cima/`
+  - `CIMA_RNA_6484974cells_36326genes_compressed.h5ad`
+  - `cima_rna_celltype_hierarchy.csv`
+  - `cima_rna_reference_pca_features.tsv.gz`
+  - `cima_rna_reference_l1_centroids.tsv`
+  - `cima_rna_reference_l2_centroids.tsv`
+  - `cima_rna_reference_l3_centroids.tsv`
+  - `cima_rna_reference_l4_centroids.tsv`
+  - `cima_rna_reference_model.json`
 
-#### `data/reference/cima/`
-- `CIMA_ATAC_3762242cells_338036peaks_compressed.h5ad`: 当前单样本注释使用的 CIMA scATAC 参考图谱。
-- `cima_atac_celltype_hierarchy.csv`: 从参考 `.h5ad` 提取的 L1/L2/L3/L4 层级映射表。
-- `cima_atac_reference_lsi_features.tsv.gz`: 从参考 `.h5ad` 抽样构建的紧凑参考 LSI 模型特征表，包含 feature index、feature ID、IDF 和 LSI loadings。
-- `cima_atac_reference_l1_centroids.tsv` / `cima_atac_reference_l2_centroids.tsv` / `cima_atac_reference_l3_centroids.tsv` / `cima_atac_reference_l4_centroids.tsv`: 同一参考模型在各层级上的 centroid 表。
-- `cima_atac_reference_model.json`: 参考模型构建参数记录。
-- `README.md`: 当前保留资产与删除策略说明。
-- 其中 `.h5ad` 是注释来源与字段定义的权威参考，单样本运行时实际直接消费的是层级表和参考 LSI centroid 模型。
-
-#### `data/raw/`
-- 按 GSE 组织原始输入数据。
-- 每个样本至少应包含 fragment 文件。
-- 如果有 `*_filtered_barcodes.tsv.gz`，优先作为初始细胞集合使用。
-- 如果有 `*singlecell*.csv.gz`，优先作为无官方 filtered barcodes 样本的 cell-calling 来源。
-- 文件发现依赖命名约定：
-  - fragment 文件名以 `GSM` 开头，且包含 `fragments`
-  - barcode 文件名以 `GSM` 开头，且包含 `barcodes`
+### `data_root/raw/`
+- 按 `GSE` 组织原始 RNA 输入。
+- 当前 RNA 单样本发现支持：
+  - 每个 `GSM` 一套 `matrix.mtx(.gz) + barcodes.tsv(.gz) + features/genes.tsv(.gz)`
+  - 每个 `GSM` 一个 10x `.h5`
+  - 每个 `GSM` 一个 `matrix.tar.gz`
+  - 一个 `GSE` 共享的 Matrix Market triplet，此时 `sample_id = GSE`
+- 当前不支持把共享 gene-count CSV 直接当作单细胞矩阵主线输入。
+- 对 `GSE226039`，只接受文件名包含 `PBMC` 的样本。
 
 ### `output/`
-- 运行时生成的结果目录，不是项目的长期真值来源。
-- 当前工作区中的 `output/` 映射到外部结果根，当前实际指向 `/mnt/g/ML2026_output`。
-- 当前按 `output/{GSE}/{GSM}` 组织单样本结果。
-- 当前跨样本的 ATAC-only 汇总 / 整合产物集中在 `output/1.only_atac/`。
-- 当前 `output/reference/` 保留供外部输出驱动脚本直接读取的 `datasets.xlsx` 与 `cima/` 参考资产副本。
-- 当前已确认的单样本基础输出包括：
-  - `qc_overview.png`
-  - `matrix/matrix.mtx`
-  - `matrix/barcodes.tsv.gz`
-  - `matrix/features.tsv.gz`
+- 运行结果不是项目长期真值来源。
+- RNA 单样本默认输出目录：`output/rna/{GSE}/{sample_id}/`
+- 当前每个 RNA 样本至少输出：
   - `metadata.csv`
   - `metadata_qc.csv`
   - `qc_summary.csv`
-  - `GSM*_seurat_qc.rds`
-- 当前已确认的单样本 UMAP / annotation 输出包括：
-  - `umap_cima_cell_type_l1.png`
-  - `umap_cima_cell_type_l2.png`
-  - `umap_cima_cell_type_l3.png`
-  - `umap_cima_cell_type_l4.png`
-- 当前支持轻量输出模式 `matrix-lite`，仅保留：
-  - `matrix/matrix.mtx`
-  - `matrix/barcodes.tsv`
-  - `matrix/features.tsv`
+  - `qc_thresholds.json`
   - `validation_result.csv`
-  - `umap_cima_cell_type_l1.png`
-  - `qc_summary.csv`
-- 当前已确认写回单样本 metadata 的新增列包括：
-  - `cima_cell_type_l1`
-  - `cima_cell_type_l2`
-  - `cima_cell_type_l3`
-  - `cima_cell_type_l4`
-  - `cima_l4_score`
-  - `cima_l4_score_margin`
-  - `umap_atac_1`
-  - `umap_atac_2`
-  - `cima_ref_umap_1`
-  - `cima_ref_umap_2`
-- 当前已确认的跨样本 ATAC-only 目录包括：
-  - `output/1.only_atac/qc_reports/`
-  - `output/1.only_atac/accepted_integration_bbknn_gsm/`
+  - `qc_overview.png`
+  - `{sample_id}.h5ad`
+  - `matrix/matrix.mtx`
+  - `matrix/barcodes.tsv.gz`
+  - `matrix/features.tsv.gz`
+  - `umap_rna_pbmcref_vs_cima_l1.png`
+  - `umap_rna_pbmcref_highlight.png`
+  - `umap_rna_cima_l1.png`
+  - `run_status.json`
+- 当前 baseline-only tuning 额外输出：
+  - 根目录：`output/rna/{GSE}/{sample_id}/tuning/`
+  - 至少包含：
+    - `candidates.csv`
+    - `selection_summary.json`
+    - `selected_params.json`
+    - `umap_rna_candidates_overview_cima_l1.png`
+    - `umap_rna_candidates_overview_pbmcref.png`
+    - `umap_rna_candidates_overview_pbmcref_highlight.png`
+  - 单 candidate 的样本级输出当前写到：
+    - `output/rna/{GSE}/{sample_id}/tuning/baseline__baseline__baseline/{GSE}/{sample_id}/`
+    - 其内部仍沿用常规单样本输出族（`metadata.csv`、`qc_summary.csv`、`.h5ad`、UMAP 图等）
+- 仓库中旧有的 ATAC / TEA-seq 输出仍位于：
+  - `output/{GSE}/{GSM}/`
+  - `output/1.only_atac/`
+  - `output/GSE214546/qc_audit/`
+  但这些目录不属于本分支 RNA 第一阶段验收主线。
 
-### `scripts/process/`
-当前主要工作目录。
+## 当前主线脚本
 
-当前主线相关文件：
-- `GSM8671454.ipynb`: 单样本基准 notebook，用于确认流程逻辑。
-- `process_single_sample.R`: 当前单样本主入口，负责 reference peak 对齐、QC 指标计算、CIMA L1-L4 注释、per-sample UMAP 绘制以及矩阵 / metadata 输出。
-- `regenerate_qc_overview.R`: 基于已有 `*_seurat_qc.rds` 重绘 `qc_overview.png`。
-- `integrate_accepted_matrix_lite.py`: 读取按数据集筛选通过的 matrix-lite 样本，复用 CIMA compact feature model 将各样本投影到统一 reference-derived LSI 空间；当前支持基线 `pooled-umap` 和低内存 `bbknn` 两种整合模式，可显式指定 `--input-root` 与 `--reference-dir`，输出一个整合 UMAP 及按 CIMA cell type、GSE/GSM 来源、健康状态和 QC 指标着色的可视化图、整合 metadata 与内存监控日志。
-- `render_integration_umap_panels.py`: 基于已有整合 metadata 直接补画 panel UMAP 大图，不重跑整合；当前用于把 `accepted_integration_metadata.csv` 按 `CIMA L1`、`CIMA L2`、`GSE`、健康状态拆成“每类一个子图”的面板图。
-- `summarize_matrix_lite_qc.R`: 汇总 `matrix-lite` 样本的 `qc_summary.csv`，生成跨样本 QC 指标表与基线 QC 图。
-- `export_baseline_qc_excel.py`: 把基线 QC 汇总导出为 Excel，并按数据集分别判断“是否可以接受”。
-- `run_single_sample_umap.R`: 基于已有单样本 `*_seurat_qc.rds` 对 `pass_qc` 细胞重建单样本 LSI / UMAP / 聚类，并可叠加外部标签映射或 RNA->ATAC label transfer 结果。
-- `filter_integration_cells.py`: 基于已有整合后注释 metadata 对旧整合输入做 cell 子集过滤。
-- `de_novo_annotate_integration_celltypes.py`: 基于 cluster marker、UMAP 邻近关系和样本偏置生成 de novo 细胞类型注释建议。
-- `diagnose_bridge_clusters.py`: 基于整合 metadata、QC 指标和 batch 构成生成 bridge / dirty cluster 诊断报告。
-- `review_celltype_annotation_validation.py`: 复核当前整合注释是否受到 marker 不支持、样本偏置或旧标签混合的影响。
-- `pipeline.py`: Python 流程管理入口，负责样本发现、调度和日志。
-- `download_from_datasets.py`: 从 `datasets.xlsx` 过滤样本并组织 GEO supplementary 下载任务。
-- `export_h5ad_obs.py`: 将 GEO 提供的 `.h5ad` 文件中的 `obs` 元数据导出为 CSV/CSV.GZ，供单样本标签映射使用。
-- `build_cima_reference_model.py`: 从 CIMA `.h5ad` 构建当前运行时使用的紧凑参考 LSI centroid 模型。
+### `scripts/only_rna/`
+- 当前 RNA 主线已切换为 Python-first 子系统。
+- 当前已实现模块：
+  - `config.py`：YAML 默认配置与 CLI override 合并；当前支持 `qc`、`plotting`、可选 `annotation.methods`，以及可选 `embedding` / `azimuth` / `tuning` 配置面；默认 tuning 为 baseline-only
+  - `discovery.py`：数据根解析、`datasets.xlsx` 可见 `scRNA` 行发现、样本本地布局发现
+  - `read_inputs.py`：triplet / `.h5` / `matrix.tar.gz` / GSE-shared triplet 读取为 `AnnData`
+  - `qc.py`：`n_counts`、`n_genes`、`pct_mt`、`pct_ribo` 计算与 QC fail flags / `pass_qc`
+  - `doublet.py`：Python doublet 结果归一化与 `scanpy.pp.scrublet` 路径
+  - `embedding.py`：仅对 `pass_qc` 细胞执行 embedding / clustering / UMAP，并写回 `cluster`、`umap_1`、`umap_2`；当前会优先使用显式 `config.embedding`，若保持 dataclass 默认值则回退到原有 PBMC 启发式默认参数
+  - `annotation.py`：保留最小 CIMA 资产加载与多方法编排；当前 mainline 默认执行 shared Azimuth `pbmcref` 注释，并把 `annotation_method_status` 写入 `adata.uns`
+  - `azimuth.py`：shared Azimuth `pbmcref` 执行模块；提供 `run_azimuth_annotation(...)`、显式 `status/detail` 语义，以及真实 R/Seurat/Azimuth 路径
+  - `qc_calibration.py`：跨样本执行 baseline 与 `stricter_v1` QC 对照的小型校准脚本；当前 `stricter_v1` 使用 `counts_lower_nmads=2.5`、`genes_lower_nmads=2.5`、`pct_mt_upper_nmads=2.5`
+  - `tuning_presets.py`：baseline-only preset 定义（QC / Azimuth / embedding 均只保留 `baseline`）
+  - `tuning_metrics.py`：单 candidate 的 `qc_score` / `annotation_score` / `embedding_score` 以及汇总逻辑
+  - `tuning_orchestrator.py`：固定 `baseline__baseline__baseline` candidate 的执行与审计写出
+  - `plotting.py`：按配置输出可读的 categorical UMAP
+  - `outputs.py`：写出 `.h5ad`、metadata/QC/validation CSV、矩阵导出、UMAP 图；当前也负责 tuning 选择产物写出
+  - `cli.py`：`discover-rna` / `run-rna-sample` / `run-rna-gse` / `tune-rna-sample` / `tune-rna-gse` / `rna-status` 的 Python 主线实现
 
-## 当前文件分工
+### `scripts/process/pipeline.py`
+- 当前支持的 RNA 命令：
+  - `discover-rna`
+  - `run-rna-sample`
+  - `run-rna-gse`
+  - `tune-rna-sample`
+  - `tune-rna-gse`
+  - `rna-status`
+- 当前行为：
+  - 保持上述命令名稳定
+  - RNA 命令分发到 `scripts.only_rna.cli`
+  - `run-rna-sample` 显式拒绝 `gse_shared` 目标
+  - `run-rna-gse` 会隐式包含受支持的 GSE-shared triplet
+  - `tune-rna-sample` 当前同样显式拒绝 `gse_shared` 目标，并只执行 `baseline__baseline__baseline`
+  - `tune-rna-gse` 当前会像 `run-rna-gse` 一样隐式包含受支持的 GSE-shared triplet，并只执行 `baseline__baseline__baseline`
+  - `rna-status` 当前按新的 RNA 输出族（包含 `{sample_id}.h5ad`）检查完成度
+
+### `scripts/process/build_cima_rna_reference_model.py`
+- 输入：
+  - `CIMA_RNA_6484974cells_36326genes_compressed.h5ad`
+- 当前行为：
+  - 按 `L4` 平衡抽样参考细胞
+  - 依据 `variances_norm` 选择高变基因
+  - 对参考表达矩阵做标准化 PCA
+  - 输出当前运行时使用的 RNA compact PCA feature model、L1-L4 centroid、层级表和 model json
+- 当前主要用途：
+  - 重建全量 RNA reference 资产
+  - 做 PBMC-focused / 子集 reference 试验
+
+## RNA 单样本处理流程
+1. 发现样本。
+   - 只读取 `datasets.xlsx` 中当前可见的 scRNA 行。
+   - 只处理本地已存在矩阵文件的样本。
+
+2. 读取计数矩阵。
+   - 当前支持 triplet、`.h5`、`matrix.tar.gz`。
+   - 若命中共享 GSE 级 Matrix Market triplet，则用 `GSE` 作为 `sample_id`。
+
+3. 计算基础 QC。
+   - `n_counts`
+   - `n_genes`
+   - `pct_mt`
+   - `pct_ribo`
+   - `doublet_score`
+   - `is_doublet`
+
+4. 执行 QC 过滤。
+   - 当前主线使用 dynamic hybrid MAD 阈值：
+     - `n_counts` / `n_genes` 在 `log10(x + 1)` 空间做 lower-tail dynamic threshold
+     - `pct_mt` / `pct_ribo` 在原值空间做 upper-tail dynamic threshold
+     - 最终阈值会受 guardrail 约束并写入 `qc_thresholds.json`
+   - `is_doublet == True` 的细胞不会进入 `pass_qc`
+
+5. 对 `pass_qc` 细胞做 RNA 降维与聚类。
+   - `scanpy.pp.normalize_total`
+   - `scanpy.pp.log1p`
+   - `scanpy.pp.highly_variable_genes`
+   - `scanpy.pp.scale`
+   - `scanpy.tl.pca`
+   - `scanpy.pp.neighbors`
+   - `scanpy.tl.leiden`（若环境缺 `igraph`，当前会回退到最小 deterministic fallback）
+   - `scanpy.tl.umap`（或小样本 / fallback 写回）
+
+6. 基于 shared Azimuth `pbmcref` 做主线 RNA 注释。
+   - 当前 mainline 默认通过 `run_azimuth_annotation(...)` 调用 R/Seurat/Azimuth `RunAzimuth(..., reference='pbmcref')`
+   - 默认输出 `azimuth_cell_type`，并在 `adata.uns['annotation_method_status']` 中记录 `status/detail`
+   - CIMA / 其他方法仍保留在多方法与 tuning 路径中，但不再是单样本 sample-root 完成度的主线契约
+
+7. 写回 metadata 和 UMAP 图。
+   - `metadata.csv` 保留全细胞信息
+   - `metadata_qc.csv` / `validation_result.csv` 聚焦 `pass_qc` 细胞
+- 当前 sample-root 主线输出 `cluster` 与 `azimuth_cell_type` 对应的 query-native RNA UMAP
+  - 另会输出 `qc_overview.png`，按每个 metric 画出样本实际使用的 dynamic MAD 阈值；其中 `n_counts` / `n_genes` 面板在 `log10(x + 1)` 空间展示 median、raw MAD cutoff 与 final applied cutoff，`pct_mt` / `pct_ribo` 面板在原值空间展示同类信息
+  - 另会输出 `umap_rna_pbmcref_highlight.png`
+  - 另会输出 `umap_rna_cima_l1.png`，且该图严格使用 `azimuth_cima_l1`，不回退到 `cima_l1`，并省略 `Unknown` 标签
+
+## 当前 baseline-only tuning 流程
+1. 固定 candidate。
+   - 当前只保留一个 candidate：`baseline__baseline__baseline`。
+
+2. 为该 candidate 构造运行配置。
+   - 当前通过 `default_tuning_presets()` 取 `baseline` preset，并用 `merge_cli_overrides(...)` 覆盖到 base config。
+
+3. 执行真实单样本主线。
+   - 当前顺序为：
+     - `read_sample_input(...)`
+     - `compute_qc_metrics(...)`
+     - `run_doublet_detection(...)`
+     - `apply_qc_filters(...)`
+     - `run_embedding(...)`
+     - `annotate_with_all_versions(..., methods=['azimuth'])`
+     - `write_sample_outputs(...)`
+   - 当前 reference 目录与主线保持一致，来自 `resolve_data_root(ROOT) / 'reference'`。
+
+4. 计算单 candidate 分数。
+   - `qc_score`：当前按 `n_cells_pass_qc / n_cells_total` 计算并 clamp 到 `[0,1]`
+   - `annotation_score`：当前按 `confidence_mean * (1 - low_confidence_fraction)` 计算；若方法状态不是 `ok`，则为 `0.0`
+   - `embedding_score`：当前按 `separation_score - fragmentation_penalty` 计算并 clamp 到 `[0,1]`
+   - `total_score`：当前为三项算术平均
+
+5. 写出 tuning 审计。
+   - 当前会写出 `candidates.csv`
+   - 若该 candidate 成功，则写出 `selection_summary.json` 和 `selected_params.json`
+   - 若该 candidate 失败，当前会保留 `candidates.csv`，但不会伪造 selection summary；此时 orchestration 会报错并停止
+
+## 当前 RNA 输出字段
+- `metadata.csv` / `metadata_qc.csv` 当前会写回：
+  - `pass_qc`
+  - `fails_count_floor`
+  - `fails_gene_floor`
+  - `fails_mt_ceiling`
+  - `fails_ribo_ceiling`
+  - `fails_doublet`
+  - `doublet_score`
+  - `is_doublet`
+  - `cluster`
+  - `umap_1`
+  - `umap_2`
+  - `azimuth_cell_type`
+  - `azimuth_score`
+  - `azimuth_score_margin`
+  - `azimuth_low_confidence`
+  - `cima_l1`
+  - `cima_l2`
+  - `cima_l1_masked`
+  - `cima_l1_low_confidence`
+  - `cima_l1_score`
+  - `cima_l1_score_margin`
+  - `cima_l2_score`
+  - `cima_l2_score_margin`
+
+## 当前 QC / validation 审计输出
+- `qc_summary.csv` 当前至少包含：
+  - `sample_id`
+  - `gse`
+  - `n_cells_total`
+  - `n_cells_pass_qc`
+  - `n_cells_fail_qc`
+  - `pass_qc_fraction`
+  - `azimuth_status`
+  - `azimuth_detail`
+  - `azimuth_score_mean`
+  - `azimuth_score_margin_mean`
+  - `azimuth_low_confidence_fraction`
+  - `annotation_score`
+  - `qc_threshold_method`
+  - `final_min_counts`
+  - `final_min_genes`
+  - `final_max_pct_mt`
+  - `final_max_pct_ribo`
+- `qc_thresholds.json` 当前记录样本级动态阈值审计，包括 method、每个 metric 的 MAD 统计、raw threshold、final threshold 和 guardrail 应用情况
+- `validation_result.csv` 当前至少包含：
+  - `completion`
+  - `metadata_all_cells`
+  - `metadata_qc_pass_qc_only`
+  - `output_presence:*` 系列检查
+  - `annotation_status:{method}` 系列检查（若 `annotation_method_status` 存在）
+
+## 非主线但保留的流程
 - `process_single_sample.R`
-  - 输入：`GSE`、`GSM`
-  - 当前行为：自动发现 fragment 和 barcode 文件，读取统一 `peak.bed`，运行单样本 QC，并使用 CIMA scATAC 参考的紧凑 LSI centroid 模型对 QC 后细胞进行分层注释
-  - 当前输出目录：`output/{GSE}/{GSM}`
-  - 当前会输出 `cima_cell_type_l1` ~ `cima_cell_type_l4`、`cima_l4_score`、`cima_l4_score_margin`、query-native `umap_atac_1` / `umap_atac_2`、reference-space `cima_ref_umap_1` / `cima_ref_umap_2`，以及 4 张按分层标签上色的 reference-projected CIMA UMAP 图
+  - 单样本 scATAC 主入口
+- `organize_tea_seq_outputs.py`
+  - TEA-seq accepted 输出整理与 QC 审计
+- `render_tea_seq_cima_cluster_umap.py`
+  - TEA-seq 的 cluster-level CIMA L1 辅助 UMAP
+- `render_tea_seq_adt_broad_umap.py`
+  - TEA-seq 的 ADT broad-label 辅助 UMAP
 
-- `build_cima_reference_model.py`
-  - 输入：`data/reference/cima/CIMA_ATAC_3762242cells_338036peaks_compressed.h5ad`
-  - 当前行为：按 L4 平衡抽样 CIMA 参考细胞，构建紧凑 LSI 参考模型并输出各层级 centroid 文件
-
-- `run_single_sample_umap.R`
-  - 用途：读取已有 `output/{GSE}/{GSM}/{GSM}_seurat_qc.rds`，仅对 `pass_qc` 细胞运行单样本 TF-IDF、LSI、聚类和 UMAP
-  - 当前支持：
-    - 直接读取外部注释 CSV，按 barcode/sample 映射 GEO 细胞类型并绘制单样本 UMAP
-    - 使用外部 scRNA Seurat reference RDS 做 `GeneActivity + FindTransferAnchors/TransferData` 的 RNA->ATAC 标签转移
-  - 当前输出：
-    - `single_sample_umap_by_cluster.png`
-    - `single_sample_umap_by_qc.png`
-    - `single_sample_umap_metadata.csv.gz`
-    - 如提供参考标签，还会额外输出按 GEO label 或 transferred label 着色的 UMAP 图和 `single_sample_umap_report.md`
-
-- `regenerate_qc_overview.R`
-  - 用途：只重绘总 QC 图，不重跑整套单样本 QC
-
-- `integrate_accepted_matrix_lite.py`
-  - 用途：对 matrix-lite 模式下按数据集分别判定“可以接受”的样本做跨样本联合可视化；`--method pooled-umap` 保留当前 pooled baseline，`--method bbknn` 走 GSM/GSE batch-aware 的低内存图整合；当前默认输入样本根目录为工作区 `output/`，默认接受样本清单位于 `output/1.only_atac/qc_reports/`，默认参考 LSI 资产目录位于 `output/reference/cima/`，输出目录可由 `--output-dir` 指向例如 `output/1.only_atac/accepted_integration_bbknn_gsm/`
-
-- `render_integration_umap_panels.py`
-  - 用途：对已生成的整合 metadata 复用现有 UMAP 坐标补画 panel 大图；当前默认输入为 `output/1.only_atac/accepted_integration_bbknn_gsm/accepted_integration_metadata.csv` 与 `output/reference/cima/cima_atac_celltype_hierarchy.csv`，输出 `accepted_integration_cima_l1_panels.png`、`accepted_integration_cima_l2_panels.png`、`accepted_integration_gse_panels.png`、`accepted_integration_health_status_panels.png`
-
-- `summarize_matrix_lite_qc.R`
-  - 用途：对全部 matrix-lite 样本的 `qc_summary.csv` 做跨样本汇总；当前默认从工作区 `output/` 读取单样本结果，并把 baseline QC 指标总表、异常样本表和基线 QC 图写到 `output/1.only_atac/qc_reports/`
-
-- `export_baseline_qc_excel.py`
-  - 用途：把 `output/1.only_atac/qc_reports/` 下的 baseline QC 汇总导出为 Excel，并按数据集内部分布生成“是否可以接受”列
-
-- `run_single_sample_umap.R`
-  - 用途：读取已有 `output/{GSE}/{GSM}/{GSM}_seurat_qc.rds`，仅对 `pass_qc` 细胞运行单样本 TF-IDF、LSI、聚类和 UMAP
-  - 当前支持：
-    - 直接读取外部注释 CSV，按 barcode/sample 映射 GEO 细胞类型并绘制单样本 UMAP
-    - 使用外部 scRNA Seurat reference RDS 做 `GeneActivity + FindTransferAnchors/TransferData` 的 RNA->ATAC 标签转移
-  - 当前输出：
-    - `single_sample_umap_by_cluster.png`
-    - `single_sample_umap_by_qc.png`
-    - `single_sample_umap_metadata.csv.gz`
-    - 如提供参考标签，还会额外输出按 GEO label 或 transferred label 着色的 UMAP 图和 `single_sample_umap_report.md`
-
-- `filter_integration_cells.py`
-  - 用途：基于已有整合后注释结果，对旧整合输入目录的 cell 子集做过滤并重建新的 merged 输入目录
-
-- `de_novo_annotate_integration_celltypes.py`
-  - 用途：不使用旧人工标签，仅依据当前 cluster marker peaks、UMAP 邻近关系和样本偏置生成一版 de novo 注释建议
-
-- `diagnose_bridge_clusters.py`
-  - 用途：基于整合 metadata、残余 `scDblFinder.score`、QC 指标、batch 构成和注释验证结果生成 bridge / dirty cluster 诊断报告
-
-- `review_celltype_annotation_validation.py`
-  - 用途：复核当前 celltype/subtype 注释是否受到 marker 不支持、样本偏置或旧标签混合的影响
-
-- `export_baseline_qc_excel.py`
-  - 用途：把 `output/1.only_atac/qc_reports/` 下的 baseline QC 汇总导出为 Excel，并按数据集内部分布生成“是否可以接受”列
-
-- `pipeline.py`
-  - 当前支持：`discover`、`run-sample`、`run-gse`、`download`、`status`
-  - 当前 `run-sample` / `run-gse` 支持 `--output-profile` 与 `--output-root`
-  - 其中 `--output-profile matrix-lite` 用于磁盘受限场景；当前默认输出根是工作区 `output/`（已映射到外部结果根），如有需要仍可用 `--output-root` 改写
-
-- `download_from_datasets.py`
-  - 当前默认过滤：`scATAC` + `fragment`
-  - 当前默认下载文件类别包括：`fragment`、`barcode`、`singlecell`
-  - 当前支持通过 `--file-kinds` 指定 GEO 文件类别，例如 `fragment`、`barcode`、`singlecell`、`summary`
-
-- `export_h5ad_obs.py`
-  - 用途：从 GEO 的 `.h5ad` processed object 中提取 `obs` 级别注释，导出为后续 `run_single_sample_umap.R --annotation-csv` 可用的表格
-
-## 单样本处理流程
-1. 读取样本参数。
-   - 输入至少包括 `GSE`、`GSM`。
-   - fragment 和 barcode 文件按命名规则自动发现。
-
-2. 确定初始 barcode 集合。
-   - 优先使用 `*_filtered_barcodes.tsv.gz`。
-   - 若缺失，则优先使用 `*singlecell*.csv.gz` 中的官方 cell-calling 结果。
-   - 若两者都缺失，则在脚本内部完成 fallback barcode 预筛。
-   - `singlecell.csv.gz` 中的附加逐 barcode 指标会带 `singlecell_` 前缀写入 metadata。
-
-3. 读取统一参考。
-   - 加载 `data/reference/peak.bed`。
-   - 准备 hg38 注释并统一染色体命名。
-
-4. 构建 peak x cell 矩阵。
-   - 检查 tabix 索引，缺失时自动创建。
-   - 使用 `FeatureMatrix()` 在统一 peak 集合上生成计数矩阵。
-
-5. 构建 Seurat / Signac 对象并计算 QC 指标。
-   - `nCount_ATAC`
-   - `nFeature_ATAC`
-   - `TSS.enrichment`
-   - `nucleosome_signal`
-   - `total_fragments`
-   - `FRiP`
-   - `unique_ratio`
-   - `blacklist_fraction`
-
-6. 进行 doublet 检测。
-   - 当前使用 `scDblFinder`。
-
-7. 进行 QC 过滤。
-   - 当前主流程使用 MAD 方式识别异常值。
-   - 当前主要基于 `nCount_ATAC`、`TSS.enrichment`、`FRiP`。
-   - doublet 检测结果参与最终过滤。
-
-8. 输出基础单样本结果。
-   - `qc_overview.png`
-   - `matrix/matrix.mtx`
-   - `matrix/barcodes.tsv.gz`
-   - `matrix/features.tsv.gz`
-   - `metadata.csv`
-   - `metadata_qc.csv`
-   - `qc_summary.csv`
-   - `GSM*_seurat_qc.rds`
-
-9. 对 QC 后细胞做单样本降维与 UMAP。
-   - 当前路线会同时保留 query-native ATAC UMAP 与 reference-projected CIMA UMAP。
-   - query-native 路线为 `RunTFIDF()` → `FindTopFeatures(min.cutoff = "q0")` → `RunSVD()` → `RunUMAP(reduction = "lsi")`。
-   - CIMA 绘图路线会复用 query 细胞投影到参考 LSI 空间后的 embedding 再计算 reference-space UMAP。
-   - UMAP 仅针对 `pass_qc == TRUE` 的细胞计算。
-   - 当前写回 metadata 的坐标列为 query-native `umap_atac_1` / `umap_atac_2` 与 reference-space `cima_ref_umap_1` / `cima_ref_umap_2`。
-
-10. 基于 CIMA scATAC 参考做 L1-L4 注释。
-    - 当前参考文件为 `data/reference/cima/CIMA_ATAC_3762242cells_338036peaks_compressed.h5ad`。
-    - 当前参考 `obs` 中使用的关键列为 `cell_type_l1`、`cell_type_l2`、`cell_type_l3`、`cell_type_l4`。
-    - 当前实现不是跨模态 RNA-to-ATAC，而是同模态 ATAC-to-ATAC 的 reference-model transfer：先从 CIMA `.h5ad` 按 L4 平衡抽样构建紧凑 TF-IDF/LSI 参考模型，再把 query 细胞投影到同一参考 LSI 空间中，按层级 centroid 做最近邻匹配。
-    - 当前注释按层级逐层进行：先直接预测 L1，再在该 L1 的允许子集中预测 L2，再在对应 L2 子集中预测 L3，最后在对应 L3 子集中预测 L4。
-    - 当前输出的 4 张 UMAP 分别按 `cima_cell_type_l1`、`cima_cell_type_l2`、`cima_cell_type_l3`、`cima_cell_type_l4` 上色，且主线绘图基于 reference-projected CIMA UMAP。
-    - 当前 4 张 UMAP 使用统一层级配色：L1 先定义主色，L2/L3/L4 在各自 L1 主色下生成同色系渐变。
-
-## CIMA 参考约束
-- 当前唯一明确的公开入口是 `https://db.cngb.org/trueblood/cima/resource`。
-- 当前已确认的公开下载路径为：`https://ftp.cngb.org/pub/SciRAID/trueblood/cima/CIMA_Resource/Cell_Atlas/CIMA_ATAC_3762242cells_338036peaks_compressed.h5ad`。
-- 当前已确认其模态为 scATAC，并且与本项目的 `data/reference/peak.bed` 共享 338036 个 peak。
-- 当前已确认的注释 metadata 列名为：`cell_type_l1`、`cell_type_l2`、`cell_type_l3`、`cell_type_l4`。
-- 当前项目运行时不再保留与主线无关的 CIMA exploratory 文件；如需额外保留，只能是被当前主线直接消费的文件或从参考 `.h5ad` 派生出的紧凑参考模型资产。
-
-## QC 原则
-- 优先使用原始数据附带的 filtered barcodes 作为初筛。
-- 缺失官方 filtered barcodes 时，必须提供可重复的 fallback 流程。
-- QC 判断以样本分布和可解释性为主，不在主流程中提前写死不必要的全局硬阈值。
-- `blacklist_fraction` 作为常规 QC 指标保留。
-- 所有过滤结果都应记录在 metadata 中，而不是只保留最终细胞列表。
-- 单样本 UMAP 与 transfer 注释都必须建立在明确记录的 QC 后细胞集合之上。
+这些脚本当前继续保留，但不属于 `only_rna` 分支第一阶段验收主线。
 
 ## 文档同步约定
-- 只要修改了项目结构、处理流程、脚本职责、输出规范或参考注释来源，就必须同步更新 `AGENTS.md`。
-- `AGENTS.md` 记录的是当前分支的实际目标、已确认事实和明确待定项；不能把未验证的假设写成既成事实。
+- 只要修改了 RNA 主线目标、输入发现规则、QC 逻辑、注释层级、输出规范或命令接口，就必须同步更新 `AGENTS.md`。
+- `AGENTS.md` 只记录当前分支已确认的真实行为；不要把未来计划写成既成事实。

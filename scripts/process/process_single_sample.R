@@ -140,6 +140,32 @@ load_singlecell_barcodes <- function(singlecell_file) {
   )
 }
 
+load_filtered_metadata_barcodes <- function(metadata_file) {
+  metrics <- read.csv(gzfile(metadata_file), stringsAsFactors = FALSE, check.names = FALSE)
+  if (nrow(metrics) == 0) {
+    stop("filtered_metadata file is empty: ", metadata_file)
+  }
+
+  original_names <- colnames(metrics)
+  normalized_names <- normalize_metric_colnames(original_names)
+  colnames(metrics) <- normalized_names
+
+  barcode_col <- intersect(c("barcodes", "barcode", "cb"), normalized_names)
+  if (length(barcode_col) == 0) {
+    stop("Unable to find barcode column in filtered_metadata file: ", metadata_file)
+  }
+  barcode_col <- barcode_col[1]
+  metrics$barcode <- as.character(metrics[[barcode_col]])
+
+  barcodes <- unique(metrics$barcode[nzchar(metrics$barcode)])
+  metrics_selected <- metrics[metrics$barcode %in% barcodes, , drop = FALSE]
+
+  list(
+    barcodes = barcodes,
+    metrics = metrics_selected
+  )
+}
+
 is_outlier <- function(dataframe, metric, nmads) {
   if (!metric %in% colnames(dataframe)) {
     stop("Metric not found in dataframe: ", metric)
@@ -673,6 +699,9 @@ run_single_sample_umap <- function(atac_obj) {
     stop("Not enough LSI dimensions available for per-sample UMAP")
   }
 
+  atac_obj <- FindNeighbors(atac_obj, reduction = "lsi", dims = dims_use, verbose = FALSE)
+  atac_obj <- FindClusters(atac_obj, resolution = 0.5, verbose = FALSE)
+
   atac_obj <- RunUMAP(
     atac_obj,
     reduction = "lsi",
@@ -683,6 +712,30 @@ run_single_sample_umap <- function(atac_obj) {
   )
 
   list(object = atac_obj, dims = dims_use)
+}
+
+save_query_umap_plot <- function(plot_df, label_col, out_path, title_text) {
+  clean_df <- plot_df[!is.na(plot_df[[label_col]]) & nzchar(plot_df[[label_col]]), , drop = FALSE]
+  plot_obj <- if (nrow(clean_df) == 0) {
+    make_placeholder_plot(title_text, paste0("No values available for ", label_col))
+  } else {
+    labels <- sort(unique(as.character(clean_df[[label_col]])))
+    palette <- grDevices::hcl.colors(length(labels), palette = "Dynamic")
+    names(palette) <- labels
+    clean_df[[label_col]] <- factor(as.character(clean_df[[label_col]]), levels = labels)
+    ggplot(clean_df, aes(x = UMAP_1, y = UMAP_2, color = .data[[label_col]])) +
+      geom_point(size = 0.25, alpha = 0.85) +
+      scale_color_manual(values = palette, drop = FALSE) +
+      labs(title = title_text, x = "UMAP_1", y = "UMAP_2", color = NULL) +
+      theme_bw(base_size = 11) +
+      theme(
+        plot.title = element_text(face = "bold"),
+        legend.key.height = grid::unit(0.35, "cm"),
+        legend.text = element_text(size = 8)
+      )
+  }
+
+  ggsave(filename = out_path, plot = plot_obj, width = 10, height = 8, units = "in", dpi = 150, limitsize = FALSE)
 }
 
 save_cima_umap_plot <- function(plot_df, label_col, palette, out_path, title_text) {
@@ -712,6 +765,35 @@ save_cima_umap_plot <- function(plot_df, label_col, palette, out_path, title_tex
     dpi = 150,
     limitsize = FALSE
   )
+}
+
+build_l1_masked_labels <- function(labels, scores, margins, score_threshold = 0.4, margin_threshold = 0.1) {
+  masked <- as.character(labels)
+  masked[is.na(masked) | !nzchar(masked)] <- "Unknown"
+
+  low_score <- !is.na(scores) & scores < score_threshold
+  low_margin <- !is.na(margins) & margins < margin_threshold
+  masked[low_score | low_margin] <- "Unknown"
+  masked
+}
+
+build_l1_cluster_consensus <- function(labels, clusters, purity_threshold = 0.8) {
+  consensus <- rep(NA_character_, length(labels))
+  purity_out <- rep(NA_real_, length(labels))
+
+  valid <- !is.na(labels) & nzchar(labels) & !is.na(clusters) & nzchar(clusters)
+  cluster_ids <- unique(as.character(clusters[valid]))
+
+  for (cluster_id in cluster_ids) {
+    idx <- which(valid & as.character(clusters) == cluster_id)
+    counts <- sort(table(labels[idx]), decreasing = TRUE)
+    top_label <- names(counts)[1]
+    purity <- as.numeric(counts[1]) / length(idx)
+    consensus[idx] <- top_label
+    purity_out[idx] <- purity
+  }
+
+  list(label = consensus, purity = purity_out)
 }
 
 ensure_tabix_index <- function(fragment_file) {
@@ -805,6 +887,7 @@ ensure_tabix_index <- function(fragment_file) {
 option_list <- list(
   make_option(c("--gse"), type = "character", help = "GSE accession"),
   make_option(c("--gsm"), type = "character", help = "GSM accession"),
+  make_option(c("--individual-id"), type = "character", default = "", help = "Individual ID for paired multi-omics linkage"),
   make_option(c("--nmads"), type = "numeric", default = 4, help = "MAD multiplier"),
   make_option(c("--output-profile"), type = "character", default = "full", help = "Output profile: full or matrix-lite"),
   make_option(c("--output-root"), type = "character", default = file.path(project_root, "output"), help = "Output root directory")
@@ -954,6 +1037,7 @@ make_barcode_density_plot <- function(fragment_stats, floor_auto, candidate_thre
 
 fragment_file <- find_single_file(raw_dir, opt$gsm, "fragments", required = TRUE)
 barcode_file <- find_single_file(raw_dir, opt$gsm, "filtered_barcodes", required = FALSE)
+filtered_metadata_file <- find_single_file(raw_dir, opt$gsm, "filtered_metadata", required = FALSE, exts = c("csv", "tsv"))
 singlecell_file <- find_single_file(raw_dir, opt$gsm, "singlecell", required = FALSE, exts = c("csv", "tsv"))
 
 cat(rep("=", 80), "\n", sep = "")
@@ -973,7 +1057,8 @@ barcode_floor_auto <- NA_real_
 barcode_candidate_threshold <- NA_real_
 barcode_candidate_rank_cap <- NA_real_
 barcode_prefilter_stats <- NULL
-singlecell_metrics <- NULL
+barcode_metrics <- NULL
+barcode_metrics_prefix <- NULL
 barcode_rank_plot <- make_placeholder_plot("Barcode Rank", "Using provided filtered_barcodes")
 barcode_density_plot <- make_placeholder_plot("Barcode Count Density", "Using provided filtered_barcodes")
 
@@ -981,12 +1066,23 @@ if (!is.null(barcode_file)) {
   cat("Barcode file:", barcode_file, "\n\n")
   barcodes <- readLines(gzfile(barcode_file))
   barcodes <- unique(barcodes[nzchar(barcodes)])
+} else if (!is.null(filtered_metadata_file)) {
+  cat("Barcode file: not found\n")
+  cat("filtered metadata file:", filtered_metadata_file, "\n\n")
+  filtered_metadata <- load_filtered_metadata_barcodes(filtered_metadata_file)
+  barcodes <- filtered_metadata$barcodes
+  barcode_metrics <- filtered_metadata$metrics
+  barcode_metrics_prefix <- "filtered_metadata_"
+  barcode_source <- "filtered_metadata"
+  barcode_rank_plot <- make_placeholder_plot("Barcode Rank", paste0("Using ", basename(filtered_metadata_file)))
+  barcode_density_plot <- make_placeholder_plot("Barcode Count Density", "Using provided filtered_metadata")
 } else if (!is.null(singlecell_file)) {
   cat("Barcode file: not found\n")
   cat("singlecell file:", singlecell_file, "\n\n")
   singlecell <- load_singlecell_barcodes(singlecell_file)
   barcodes <- singlecell$barcodes
-  singlecell_metrics <- singlecell$metrics
+  barcode_metrics <- singlecell$metrics
+  barcode_metrics_prefix <- "singlecell_"
   barcode_source <- "singlecell_csv"
   barcode_rank_plot <- make_placeholder_plot("Barcode Rank", paste0("Using ", basename(singlecell_file)))
   barcode_density_plot <- make_placeholder_plot("Barcode Count Density", paste0("Using ", singlecell$selector_source))
@@ -1148,14 +1244,14 @@ if ("reads_count" %in% colnames(fragment_stats)) {
   )
 }
 
-if (!is.null(singlecell_metrics) && nrow(singlecell_metrics) > 0) {
-  rownames(singlecell_metrics) <- singlecell_metrics$barcode
-  common_metrics <- intersect(rownames(singlecell_metrics), colnames(atac_obj))
-  singlecell_cols <- setdiff(colnames(singlecell_metrics), "barcode")
-  for (metric_name in singlecell_cols) {
-    meta_col <- paste0("singlecell_", metric_name)
+if (!is.null(barcode_metrics) && nrow(barcode_metrics) > 0) {
+  rownames(barcode_metrics) <- barcode_metrics$barcode
+  common_metrics <- intersect(rownames(barcode_metrics), colnames(atac_obj))
+  barcode_metric_cols <- setdiff(colnames(barcode_metrics), "barcode")
+  for (metric_name in barcode_metric_cols) {
+    meta_col <- paste0(barcode_metrics_prefix, metric_name)
     atac_obj@meta.data[, meta_col] <- NA
-    atac_obj@meta.data[common_metrics, meta_col] <- singlecell_metrics[common_metrics, metric_name]
+    atac_obj@meta.data[common_metrics, meta_col] <- barcode_metrics[common_metrics, metric_name]
   }
 }
 atac_obj <- FRiP(object = atac_obj, assay = "ATAC", total.fragments = "fragments")
@@ -1208,8 +1304,13 @@ meta_data$cima_cell_type_l1 <- NA_character_
 meta_data$cima_cell_type_l2 <- NA_character_
 meta_data$cima_cell_type_l3 <- NA_character_
 meta_data$cima_cell_type_l4 <- NA_character_
+meta_data$cima_cell_type_l1_masked <- NA_character_
+meta_data$cima_cell_type_l1_cluster_consensus <- NA_character_
+meta_data$cima_l1_low_confidence <- NA
+meta_data$cima_l1_cluster_purity <- NA_real_
 meta_data$cima_l4_score <- NA_real_
 meta_data$cima_l4_score_margin <- NA_real_
+meta_data$seurat_clusters <- NA_character_
 meta_data$umap_atac_1 <- NA_real_
 meta_data$umap_atac_2 <- NA_real_
 meta_data$cima_ref_umap_1 <- NA_real_
@@ -1221,9 +1322,13 @@ cat("Cells after QC:", length(qc_cells), "\n")
 cat("QC rate:", sprintf("%.2f%%", length(qc_cells) / nrow(meta_data) * 100), "\n\n")
 
 umap_l1_file <- file.path(output_dir, "umap_cima_cell_type_l1.png")
+umap_l1_query_file <- file.path(output_dir, "umap_atac_cima_cell_type_l1.png")
+umap_l1_query_masked_file <- file.path(output_dir, "umap_atac_cima_cell_type_l1_masked.png")
+umap_l1_query_consensus_file <- file.path(output_dir, "umap_atac_cima_cell_type_l1_consensus.png")
 umap_l2_file <- file.path(output_dir, "umap_cima_cell_type_l2.png")
 umap_l3_file <- file.path(output_dir, "umap_cima_cell_type_l3.png")
 umap_l4_file <- file.path(output_dir, "umap_cima_cell_type_l4.png")
+umap_cluster_file <- file.path(output_dir, "umap_atac_clusters.png")
 
 cat("[8/10] Assigning CIMA labels...\n")
 annotation_result <- annotate_cima_reference_model(qc_counts, cima_hierarchy, cima_feature_model, cima_centroids)
@@ -1238,6 +1343,13 @@ annotation_cols <- c(
   "cima_l4_score_margin"
 )
 atac_obj@meta.data[annotation_df$cell_barcode, annotation_cols] <- annotation_df[, annotation_cols]
+masked_l1_labels <- build_l1_masked_labels(
+  annotation_df$cima_cell_type_l1,
+  annotation_df$cima_l4_score,
+  annotation_df$cima_l4_score_margin
+)
+atac_obj@meta.data[annotation_df$cell_barcode, "cima_cell_type_l1_masked"] <- masked_l1_labels
+atac_obj@meta.data[annotation_df$cell_barcode, "cima_l1_low_confidence"] <- masked_l1_labels == "Unknown"
 cat("Assigned L4 labels:", length(unique(annotation_df$cima_cell_type_l4)), "\n\n")
 
 cat("[9/10] Running per-sample UMAP...\n")
@@ -1257,16 +1369,31 @@ if (length(qc_cells) >= 3) {
 
   if (!is.null(umap_result)) {
     atac_qc_obj <- umap_result$object
+    atac_obj@meta.data[rownames(atac_qc_obj@meta.data), "seurat_clusters"] <- as.character(atac_qc_obj$seurat_clusters)
     umap_embeddings <- Embeddings(atac_qc_obj[["umap"]])
     atac_obj@meta.data[rownames(umap_embeddings), c("umap_atac_1", "umap_atac_2")] <- umap_embeddings[, 1:2, drop = FALSE]
-    umap_plot_df <- data.frame(
+    query_umap_df <- data.frame(
       cell_barcode = rownames(umap_embeddings),
       UMAP_1 = umap_embeddings[, 1],
       UMAP_2 = umap_embeddings[, 2],
-      atac_qc_obj@meta.data[, c("cima_cell_type_l1", "cima_cell_type_l2", "cima_cell_type_l3", "cima_cell_type_l4"), drop = FALSE],
+      seurat_clusters = as.character(atac_qc_obj$seurat_clusters),
+      atac_qc_obj@meta.data[, c("cima_cell_type_l1", "cima_cell_type_l1_masked", "cima_cell_type_l2", "cima_cell_type_l3", "cima_cell_type_l4"), drop = FALSE],
       stringsAsFactors = FALSE,
       row.names = rownames(umap_embeddings)
     )
+    # Use per-cell masked labels directly for query-native ATAC visualization.
+    # Cluster-level consensus tends to over-collapse mixed ATAC neighborhoods,
+    # which hides real per-cell heterogeneity compared with paired RNA labels.
+    query_umap_df$cima_cell_type_l1_cluster_consensus <- query_umap_df$cima_cell_type_l1_masked
+    query_umap_df$cima_l1_cluster_purity <- NA_real_
+    atac_obj@meta.data[query_umap_df$cell_barcode, "cima_cell_type_l1_cluster_consensus"] <- query_umap_df$cima_cell_type_l1_cluster_consensus
+    atac_obj@meta.data[query_umap_df$cell_barcode, "cima_l1_cluster_purity"] <- query_umap_df$cima_l1_cluster_purity
+    save_query_umap_plot(query_umap_df, "seurat_clusters", umap_cluster_file, paste0(opt$gsm, " UMAP by ATAC cluster"))
+    save_cima_umap_plot(query_umap_df, "cima_cell_type_l1", cima_palettes$cima_cell_type_l1, umap_l1_query_file, paste0(opt$gsm, " query-native UMAP by CIMA L1"))
+    l1_masked_palette <- c(cima_palettes$cima_cell_type_l1, Unknown = "#7F7F7F")
+    save_cima_umap_plot(query_umap_df, "cima_cell_type_l1_masked", l1_masked_palette, umap_l1_query_masked_file, paste0(opt$gsm, " query-native UMAP by CIMA L1 (masked)"))
+    save_cima_umap_plot(query_umap_df, "cima_cell_type_l1_cluster_consensus", l1_masked_palette, umap_l1_query_consensus_file, paste0(opt$gsm, " query-native UMAP by CIMA L1 (pointwise masked)"))
+    umap_plot_df <- query_umap_df
   }
 
   cima_ref_result <- tryCatch(
@@ -1300,6 +1427,9 @@ if (is.null(umap_plot_df)) {
     UMAP_1 = numeric(),
     UMAP_2 = numeric(),
     cima_cell_type_l1 = character(),
+    cima_cell_type_l1_masked = character(),
+    cima_cell_type_l1_cluster_consensus = character(),
+    cima_l1_cluster_purity = numeric(),
     cima_cell_type_l2 = character(),
     cima_cell_type_l3 = character(),
     cima_cell_type_l4 = character(),
@@ -1394,6 +1524,7 @@ ggsave(
 
 meta_data <- atac_obj@meta.data
 metadata_all <- cbind(cell_barcode = rownames(meta_data), meta_data)
+metadata_all$individual_id <- opt$`individual-id`
 metadata_qc <- metadata_all[metadata_all$pass_qc %in% TRUE, , drop = FALSE]
 median_unique_ratio <- if ("unique_ratio" %in% colnames(atac_obj@meta.data)) {
   sprintf("%.2f", median(atac_obj$unique_ratio[atac_obj$pass_qc], na.rm = TRUE))
@@ -1406,6 +1537,19 @@ median_cima_l4_score <- if (all(is.na(metadata_qc$cima_l4_score))) {
   sprintf("%.4f", median(metadata_qc$cima_l4_score, na.rm = TRUE))
 }
 unique_cima_l4 <- length(unique(metadata_qc$cima_cell_type_l4[!is.na(metadata_qc$cima_cell_type_l4)]))
+query_cluster_count <- length(unique(metadata_qc$seurat_clusters[!is.na(metadata_qc$seurat_clusters) & nzchar(metadata_qc$seurat_clusters)]))
+low_confidence_l1_count <- sum(metadata_qc$cima_l1_low_confidence %in% TRUE, na.rm = TRUE)
+low_confidence_l1_frac <- if (nrow(metadata_qc) > 0) {
+  sprintf("%.2f%%", low_confidence_l1_count / nrow(metadata_qc) * 100)
+} else {
+  ""
+}
+cluster_unknown_l1_count <- sum(metadata_qc$cima_cell_type_l1_cluster_consensus %in% "Unknown", na.rm = TRUE)
+cluster_unknown_l1_frac <- if (nrow(metadata_qc) > 0) {
+  sprintf("%.2f%%", cluster_unknown_l1_count / nrow(metadata_qc) * 100)
+} else {
+  ""
+}
 
 summary_stats <- data.frame(
   metric = c(
@@ -1429,6 +1573,11 @@ summary_stats <- data.frame(
     "median_fragments",
     "median_unique_ratio",
     "median_blacklist_fraction",
+    "query_cluster_count",
+    "cima_l1_low_confidence_count",
+    "cima_l1_low_confidence_frac",
+    "cima_l1_cluster_unknown_count",
+    "cima_l1_cluster_unknown_frac",
     "cima_reference_atac_h5ad",
     "cima_reference_model_features",
     "cima_annotation_levels",
@@ -1457,6 +1606,11 @@ summary_stats <- data.frame(
     sprintf("%.0f", median(atac_obj$fragments[atac_obj$pass_qc], na.rm = TRUE)),
     median_unique_ratio,
     sprintf("%.4f", median(atac_obj$blacklist_fraction[atac_obj$pass_qc], na.rm = TRUE)),
+    query_cluster_count,
+    low_confidence_l1_count,
+    low_confidence_l1_frac,
+    cluster_unknown_l1_count,
+    cluster_unknown_l1_frac,
     cima_reference_file,
     cima_feature_model_file,
     "l1,l2,l3,l4",
@@ -1488,6 +1642,10 @@ validation_keep <- intersect(
     "blacklist_fraction",
     "scDblFinder.class",
     "cima_cell_type_l1",
+    "cima_cell_type_l1_masked",
+    "cima_cell_type_l1_cluster_consensus",
+    "cima_l1_low_confidence",
+    "cima_l1_cluster_purity",
     "cima_cell_type_l2",
     "cima_cell_type_l3",
     "cima_cell_type_l4",
@@ -1522,15 +1680,19 @@ if (!is_lite_output) {
 }
 
 cat("UMAP L1:", umap_l1_file, "\n")
+if (file.exists(umap_l1_query_file)) cat("UMAP L1 query-native:", umap_l1_query_file, "\n")
+if (file.exists(umap_l1_query_masked_file)) cat("UMAP L1 query-native masked:", umap_l1_query_masked_file, "\n")
+if (file.exists(umap_l1_query_consensus_file)) cat("UMAP L1 query-native consensus:", umap_l1_query_consensus_file, "\n")
 cat("Summary:", summary_file, "\n")
 cat("Validation result:", validation_file, "\n")
 cat("QC matrix:", matrix_file, "\n")
 if (!is_lite_output) {
   cat("QC overview:", qc_plot_file, "\n")
-  cat("UMAP L2:", umap_l2_file, "\n")
-  cat("UMAP L3:", umap_l3_file, "\n")
-  cat("UMAP L4:", umap_l4_file, "\n")
-  cat("Metadata:", metadata_file, "\n")
+cat("UMAP L2:", umap_l2_file, "\n")
+cat("UMAP L3:", umap_l3_file, "\n")
+cat("UMAP L4:", umap_l4_file, "\n")
+if (file.exists(umap_cluster_file)) cat("UMAP clusters:", umap_cluster_file, "\n")
+cat("Metadata:", metadata_file, "\n")
   cat("QC metadata:", metadata_qc_file, "\n")
   cat("RDS:", rds_file, "\n")
 }

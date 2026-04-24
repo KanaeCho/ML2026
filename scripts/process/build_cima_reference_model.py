@@ -7,6 +7,7 @@ import csv
 import gzip
 import json
 import random
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -102,11 +103,74 @@ def write_centroids(
             )
 
 
+def parse_csv_arg(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    return items or None
+
+
+def select_rows_balanced_by_l1(
+    by_l1_l4: dict[str, dict[str, list[tuple[int, str, str]]]],
+    per_l1_total: int | None,
+    per_l4: int,
+) -> tuple[list[int], list[str], list[str], list[str], list[str]]:
+    selected_rows: list[int] = []
+    selected_l1: list[str] = []
+    selected_l2: list[str] = []
+    selected_l3: list[str] = []
+    selected_l4: list[str] = []
+
+    for l1_label in sorted(by_l1_l4):
+        l4_groups = {k: list(v) for k, v in by_l1_l4[l1_label].items() if v}
+        if not l4_groups:
+            continue
+
+        chosen: dict[str, list[tuple[int, str, str]]] = {
+            label: [] for label in l4_groups
+        }
+        if per_l1_total is None:
+            for l4_label, rows in l4_groups.items():
+                take = min(len(rows), per_l4)
+                pick = sorted(rows[:take], key=lambda item: item[0])
+                chosen[l4_label] = pick
+        else:
+            pointers = {label: 0 for label in l4_groups}
+            labels_cycle = list(sorted(l4_groups))
+            while sum(len(v) for v in chosen.values()) < per_l1_total:
+                progressed = False
+                for l4_label in labels_cycle:
+                    pointer = pointers[l4_label]
+                    rows = l4_groups[l4_label]
+                    if pointer >= len(rows):
+                        continue
+                    chosen[l4_label].append(rows[pointer])
+                    pointers[l4_label] += 1
+                    progressed = True
+                    if sum(len(v) for v in chosen.values()) >= per_l1_total:
+                        break
+                if not progressed:
+                    break
+
+        for l4_label in sorted(chosen):
+            rows = sorted(chosen[l4_label], key=lambda item: item[0])
+            selected_rows.extend([row_idx for row_idx, _, _ in rows])
+            selected_l1.extend([l1_label] * len(rows))
+            selected_l2.extend([l2 for _, l2, _ in rows])
+            selected_l3.extend([l3 for _, _, l3 in rows])
+            selected_l4.extend([l4_label] * len(rows))
+
+    return selected_rows, selected_l1, selected_l2, selected_l3, selected_l4
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--h5ad", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--per-l4", type=int, default=100)
+    parser.add_argument("--per-l1-total", type=int, default=None)
+    parser.add_argument("--include-l1", type=str, default=None)
+    parser.add_argument("--exclude-l4-regex", type=str, default=None)
     parser.add_argument("--top-features", type=int, default=12000)
     parser.add_argument("--components", type=int, default=31)
     parser.add_argument("--seed", type=int, default=42)
@@ -117,6 +181,11 @@ def main() -> int:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    include_l1 = parse_csv_arg(args.include_l1)
+    exclude_l4_regex = (
+        re.compile(args.exclude_l4_regex) if args.exclude_l4_regex else None
+    )
 
     with h5py.File(args.h5ad, "r") as handle:
         obs = cast(Any, handle["obs"])
@@ -135,26 +204,28 @@ def main() -> int:
 
         del cell_type_l1_categories, cell_type_l2_categories, cell_type_l3_categories
 
-        by_l4: dict[str, list[int]] = {label: [] for label in cell_type_l4_categories}
-        for idx, label in enumerate(cell_type_l4_values):
-            if label:
-                by_l4[label].append(idx)
+        by_l1_l4: dict[str, dict[str, list[tuple[int, str, str]]]] = {}
+        kept_l4: set[str] = set()
+        for idx, l4_label in enumerate(cell_type_l4_values):
+            if not l4_label:
+                continue
+            l1_label = cell_type_l1_values[idx]
+            if include_l1 is not None and l1_label not in include_l1:
+                continue
+            if exclude_l4_regex is not None and exclude_l4_regex.search(l4_label):
+                continue
+            kept_l4.add(l4_label)
+            by_l1_l4.setdefault(l1_label, {}).setdefault(l4_label, []).append(
+                (idx, cell_type_l2_values[idx], cell_type_l3_values[idx])
+            )
 
-        selected_rows: list[int] = []
-        selected_l1: list[str] = []
-        selected_l2: list[str] = []
-        selected_l3: list[str] = []
-        selected_l4: list[str] = []
-        for label in cell_type_l4_categories:
-            rows = by_l4[label]
-            if len(rows) > args.per_l4:
-                rows = random.sample(rows, args.per_l4)
-                rows.sort()
-            selected_rows.extend(rows)
-            selected_l1.extend([cell_type_l1_values[row] for row in rows])
-            selected_l2.extend([cell_type_l2_values[row] for row in rows])
-            selected_l3.extend([cell_type_l3_values[row] for row in rows])
-            selected_l4.extend([cell_type_l4_values[row] for row in rows])
+        selected_rows, selected_l1, selected_l2, selected_l3, selected_l4 = (
+            select_rows_balanced_by_l1(
+                by_l1_l4,
+                args.per_l1_total,
+                args.per_l4,
+            )
+        )
 
         x_group = cast(Any, handle["X"])
         indptr = cast(Any, x_group["indptr"])[:]
@@ -245,6 +316,10 @@ def main() -> int:
     metadata = {
         "source_h5ad": str(Path(args.h5ad).resolve()),
         "per_l4": args.per_l4,
+        "per_l1_total": args.per_l1_total,
+        "include_l1": include_l1,
+        "exclude_l4_regex": args.exclude_l4_regex,
+        "kept_l4_labels": len(set(selected_l4)),
         "n_reference_cells": len(selected_rows),
         "top_features": args.top_features,
         "components": args.components,
