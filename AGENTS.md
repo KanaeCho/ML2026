@@ -29,10 +29,14 @@
   - tuning 当前只执行固定 candidate：`baseline__baseline__baseline`
   - 该 candidate 会真实执行单样本主线（读取矩阵、QC、doublet、embedding、Azimuth、样本输出），不是占位 stub
 - `GSE226039` 当前按文件名只保留 `PBMC` 样本参与 RNA 发现与运行，不把 Ileum / Rectum 组织一起纳入本分支主线。
-- 当前已下载 `co2` 共测数据集 `GSE206284` 的 RNA / ATAC 原始文件；其 `data/reference/co2_sample_manifest.csv` 与 `data/reference/co2_rna_atac_pairing.csv` 当前作为共测样本桥表保留 `individual_id`。
+- 当前已下载 `co2` 共测数据集 `GSE206284` 的 RNA / ATAC 原始文件；其 `data/reference/co2_sample_manifest.csv` 与 `data/reference/co2_rna_atac_pairing.csv` 当前作为共测样本桥表保留 `individual_id`，但因数据质量不满足当前共测验收要求，`co2` 不再作为本分支主线处理对象。
 - 当前 `only_rna` 对 `GSE206284` 的 RNA 发现与读入已支持从 `co2_sample_manifest.csv` 注入 `individual_id`，并会写入 RNA `metadata.csv` / `metadata_qc.csv`。
 - 当前 `process_single_sample.R` 已支持 `--individual-id`，`pipeline.py run-sample` 会把 `GSE206284` ATAC 样本的 `individual_id` 传入，并写入 ATAC `metadata.csv` / `metadata_qc.csv`。
 - 当前 `GSE206284` 的 ATAC 原始 `scATAC_prfragments.tar.gz` 已验证内含 `fragments.tsv.gz + .tbi`；现通过解包并补回 `GSM` 前缀后，可被现有 ATAC `discover` / `run-sample` 识别。
+- 当前新增 `scripts/co/` 共测子系统；`co-run-atac-*` 会把共测 ATAC 样本包装后复用 `scripts/process/process_single_sample.R` 的 only_atac 主线，并输出到 `output/co/atac/`。
+- 当前 `co-run-atac-sample` 已在 `GSE206284/GSM6254833` smoke 通过；切换为 only_atac 主线路由后，co-ATAC 输出契约聚焦 CIMA ATAC L1/L2 注释和 reference-space UMAP，不再输出 `umap_atac_*` query-native 图。
+- 当前 `co1` 共测数据集 `7555405` 已接入 `scripts/co/`：原始样本目录与 pipeline 发现 / 输出均使用英文 `sample_id`（如 `donorA_Day0`）。
+- 当前 `co1` / `7555405` 共测分支任务已完成：24 个样本的 RNA 输出位于 `output/co/rna/7555405/`，24 个样本的 ATAC 输出位于 `output/co/atac/7555405/`，co-ATAC 状态均为 `success` 且 `outputs_complete=true`。
 
 ## 目录结构
 
@@ -43,6 +47,8 @@
 ### `data_root/reference/`
 - `datasets.xlsx`
   - RNA 样本发现基于 Excel 第一张表中当前可见、且 `assay=scRNA` 的行。
+- `co1.xlsx`
+  - `7555405` 共测数据集说明；实际运行时使用 `data_root/raw/7555405/sample_layout.tsv` 中的英文 `sample_id` 映射。
 - `cima/`
   - `CIMA_RNA_6484974cells_36326genes_compressed.h5ad`
   - `cima_rna_celltype_hierarchy.csv`
@@ -98,6 +104,21 @@
   - `output/1.only_atac/`
   - `output/GSE214546/qc_audit/`
   但这些目录不属于本分支 RNA 第一阶段验收主线。
+- 共测 ATAC 输出目录：`output/co/atac/{GSE}/{GSM}/`
+- 对 `7555405`，共测输出目录使用英文 sample id，例如 RNA `output/co/rna/7555405/donorA_Day0/` 与 ATAC `output/co/atac/7555405/donorA_Day0/`。
+- 当前 co-ATAC 样本至少输出：
+  - `metadata.csv`
+  - `metadata_qc.csv`
+  - `qc_summary.csv`
+  - `validation_result.csv`
+  - `qc_overview.png`
+  - `umap_cima_cell_type_l1.png`
+  - `umap_cima_cell_type_l2.png`
+  - `matrix/matrix.mtx`
+  - `matrix/barcodes.tsv.gz`
+  - `matrix/features.tsv.gz`
+  - `{GSM}_seurat_qc.rds`
+  - `run_status.json`
 
 ## 当前主线脚本
 
@@ -136,6 +157,32 @@
   - `tune-rna-sample` 当前同样显式拒绝 `gse_shared` 目标，并只执行 `baseline__baseline__baseline`
   - `tune-rna-gse` 当前会像 `run-rna-gse` 一样隐式包含受支持的 GSE-shared triplet，并只执行 `baseline__baseline__baseline`
   - `rna-status` 当前按新的 RNA 输出族（包含 `{sample_id}.h5ad`）检查完成度
+- 当前支持的共测命令：
+  - `co-discover`
+  - `co-status`
+  - `co-run-rna-sample`
+  - `co-run-rna-gse`
+  - `co-run-atac-sample`
+  - `co-run-atac-gse`
+- 共测命令当前行为：
+  - `co-discover` 基于 `data/reference/co2_sample_manifest.csv` 与 `data/raw/7555405/sample_layout.tsv` 同时列出 RNA 与 ATAC 样本，并显示 `individual_id`
+  - `co-run-rna-*` 复用 `scripts.only_rna.cli` 的 RNA 单样本流程，默认输出根为 `output/co/rna/`
+  - `co-run-atac-*` 复用 `scripts/process/process_single_sample.R` 的 only_atac 主线，默认输出根为 `output/co/atac/`；`co-run-atac-gse` 支持 `--jobs` 并行处理样本
+  - `co-status` 当前只检查 co-ATAC only_atac 输出完整性
+
+### `scripts/co/`
+- 当前共测子系统已实现：
+  - `cli.py`：共测 manifest 发现、RNA 路由复用、ATAC only_atac 包装调度与状态检查
+  - `process_co_atac_sample.R`：旧独立 co-ATAC 质控与 query-native 可视化脚本，当前不再作为 `co-run-atac-*` 主路由
+- 当前 `7555405` 接入方式：
+  - 从 `data/raw/7555405/sample_layout.tsv` 读取 `folder_name`、`sample_id`、`donor`、`timepoint`、`rna_ncells`、`atac_ncells`；当前 `folder_name` 与 `sample_id` 均为英文样本名
+  - RNA 输入来自 `data/raw/7555405/{folder_name}/RNA/matrix.mtx + barcodes.tsv + features.tsv`
+  - ATAC 输入来自 `data/raw/7555405/{folder_name}/ATAC/fragments.tsv.gz`
+  - `atac_ncells` 当前用于给 only_atac fragment-count barcode inference 提供每样本 `max_inferred_barcodes` 上限
+- 当前 co-ATAC 处理流程：
+  - `co-run-atac-*` 通过显式 `--fragment-file` 把共测 fragment 文件传给 only_atac 主线
+  - only_atac 从 `fragments.tsv.gz` 读取 ATAC 片段；若无 `filtered_barcodes` / `filtered_metadata` / `singlecell` 辅助文件，则按主线 barcode inference 从 fragment counts 推断初始 barcode 集合；对 `7555405`，co 包装层会传入 `--min-inferred-fragments 1000` 和来自 `atac_ncells` 的 `--max-inferred-barcodes`
+  - 使用 `peak.bed` 构建 peak-by-cell matrix，计算 QC 指标，使用 `scDblFinder` 做 doublet 检测，并执行 only_atac 既有 QC / CIMA ATAC L1/L2 注释 / reference-space UMAP 输出流程
 
 ### `scripts/process/build_cima_rna_reference_model.py`
 - 输入：

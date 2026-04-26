@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.co import cli as co_cli
 from scripts.only_rna import cli as only_rna_cli
 
 DEFAULT_DATA_ROOT = Path("/mnt/g/ML2026_data")
@@ -355,6 +356,7 @@ def expected_outputs(
     if output_profile in {"matrix-lite", "validation-lite"}:
         return [
             output_dir / "umap_cima_cell_type_l1.png",
+            output_dir / "umap_cima_cell_type_l2.png",
             output_dir / "qc_summary.csv",
             output_dir / "validation_result.csv",
             output_dir / "matrix" / "matrix.mtx",
@@ -366,8 +368,6 @@ def expected_outputs(
         output_dir / "qc_overview.png",
         output_dir / "umap_cima_cell_type_l1.png",
         output_dir / "umap_cima_cell_type_l2.png",
-        output_dir / "umap_cima_cell_type_l3.png",
-        output_dir / "umap_cima_cell_type_l4.png",
         output_dir / "metadata.csv",
         output_dir / "metadata_qc.csv",
         output_dir / "qc_summary.csv",
@@ -889,6 +889,70 @@ def build_parser() -> argparse.ArgumentParser:
     rna_status_parser = subparsers.add_parser("rna-status", help="Show RNA run status")
     rna_status_parser.add_argument("--gse", help="Restrict RNA status to one GSE")
 
+    co_discover_parser = subparsers.add_parser(
+        "co-discover", help="List co-assay RNA and ATAC samples"
+    )
+    co_discover_parser.add_argument(
+        "--gse", help="Restrict co-assay discovery to one GSE"
+    )
+
+    co_status_parser = subparsers.add_parser(
+        "co-status", help="Show co-ATAC only_atac run status"
+    )
+    co_status_parser.add_argument("--gse", help="Restrict co-ATAC status to one GSE")
+    co_status_parser.add_argument("--output-root", default=str(ROOT / "output" / "co"))
+
+    co_run_rna_sample_parser = subparsers.add_parser(
+        "co-run-rna-sample", help="Run one co-assay RNA sample via only_rna"
+    )
+    co_run_rna_sample_parser.add_argument("--gse", required=True)
+    co_run_rna_sample_parser.add_argument("--sample-id", required=True)
+    co_run_rna_sample_parser.add_argument("--python-bin", default=sys.executable or "python3")
+    co_run_rna_sample_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "co")
+    )
+    co_run_rna_sample_parser.add_argument("--force", action="store_true")
+    co_run_rna_sample_parser.add_argument("--dry-run", action="store_true")
+
+    co_run_rna_gse_parser = subparsers.add_parser(
+        "co-run-rna-gse", help="Run all co-assay RNA samples via only_rna"
+    )
+    co_run_rna_gse_parser.add_argument("--gse", required=True)
+    co_run_rna_gse_parser.add_argument("--python-bin", default=sys.executable or "python3")
+    co_run_rna_gse_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "co")
+    )
+    co_run_rna_gse_parser.add_argument("--force", action="store_true")
+    co_run_rna_gse_parser.add_argument("--dry-run", action="store_true")
+
+    co_run_atac_sample_parser = subparsers.add_parser(
+        "co-run-atac-sample", help="Run one co-ATAC sample via only_atac"
+    )
+    co_run_atac_sample_parser.add_argument("--gse", required=True)
+    co_run_atac_sample_parser.add_argument("--gsm", required=True)
+    co_run_atac_sample_parser.add_argument("--rscript", default="Rscript")
+    co_run_atac_sample_parser.add_argument("--output-profile", default="full")
+    co_run_atac_sample_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "co")
+    )
+    co_run_atac_sample_parser.add_argument("--nmads", type=float, default=4)
+    co_run_atac_sample_parser.add_argument("--force", action="store_true")
+    co_run_atac_sample_parser.add_argument("--dry-run", action="store_true")
+
+    co_run_atac_gse_parser = subparsers.add_parser(
+        "co-run-atac-gse", help="Run all co-ATAC samples under one GSE via only_atac"
+    )
+    co_run_atac_gse_parser.add_argument("--gse", required=True)
+    co_run_atac_gse_parser.add_argument("--rscript", default="Rscript")
+    co_run_atac_gse_parser.add_argument("--output-profile", default="full")
+    co_run_atac_gse_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "co")
+    )
+    co_run_atac_gse_parser.add_argument("--nmads", type=float, default=4)
+    co_run_atac_gse_parser.add_argument("--jobs", type=int, default=1)
+    co_run_atac_gse_parser.add_argument("--force", action="store_true")
+    co_run_atac_gse_parser.add_argument("--dry-run", action="store_true")
+
     tea_seq_parser = subparsers.add_parser(
         "tea-seq-audit",
         help="Organize TEA-seq accepted outputs and write a dataset-level QC audit",
@@ -921,6 +985,24 @@ def main() -> int:
 
     if args.command == "rna-status":
         return only_rna_cli.cmd_rna_status(args)
+
+    if args.command == "co-discover":
+        return co_cli.cmd_discover(args)
+
+    if args.command == "co-status":
+        return co_cli.cmd_status(args)
+
+    if args.command == "co-run-rna-sample":
+        return co_cli.cmd_run_rna_sample(args)
+
+    if args.command == "co-run-rna-gse":
+        return co_cli.cmd_run_rna_gse(args)
+
+    if args.command == "co-run-atac-sample":
+        return co_cli.cmd_run_atac_sample(args)
+
+    if args.command == "co-run-atac-gse":
+        return co_cli.cmd_run_atac_gse(args)
 
     if args.command == "tea-seq-audit":
         return run_tea_seq_audit(
