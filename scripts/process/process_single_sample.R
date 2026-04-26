@@ -326,7 +326,7 @@ infer_barcode_floor_auto <- function(counts) {
   max(1, ceiling((10 ^ dens$x[best_valley]) - 1))
 }
 
-infer_barcodes <- function(fragment_file) {
+infer_barcodes <- function(fragment_file, min_fragments = NA_real_, max_barcodes = NA_integer_) {
   fragment_stats <- CountFragments(fragment_file)
   fragment_stats <- fragment_stats[!is.na(fragment_stats$CB) & nzchar(fragment_stats$CB), , drop = FALSE]
   fragment_stats <- fragment_stats[fragment_stats$frequency_count > 0, , drop = FALSE]
@@ -350,6 +350,12 @@ infer_barcodes <- function(fragment_file) {
   rank_df <- rank_df[order(rank_df$frequency_count, decreasing = TRUE), , drop = FALSE]
   rank_df$rank <- seq_len(nrow(rank_df))
   candidate_rank_cap <- max(1, inflection$rank)
+  if (!is.na(max_barcodes) && is.finite(max_barcodes) && max_barcodes > 0) {
+    candidate_rank_cap <- as.integer(max_barcodes)
+  }
+  if (!is.na(min_fragments) && is.finite(min_fragments) && min_fragments > 0) {
+    candidate_threshold <- as.numeric(min_fragments)
+  }
 
   keep <- fragment_stats$frequency_count >= candidate_threshold &
     rank_df$rank[match(fragment_stats$CB, rank_df$CB)] <= candidate_rank_cap
@@ -723,19 +729,29 @@ save_query_umap_plot <- function(plot_df, label_col, out_path, title_text) {
     palette <- grDevices::hcl.colors(length(labels), palette = "Dynamic")
     names(palette) <- labels
     clean_df[[label_col]] <- factor(as.character(clean_df[[label_col]]), levels = labels)
+    legend_ncols <- if (length(labels) >= 24) 3 else if (length(labels) >= 12) 2 else 1
     ggplot(clean_df, aes(x = UMAP_1, y = UMAP_2, color = .data[[label_col]])) +
       geom_point(size = 0.25, alpha = 0.85) +
       scale_color_manual(values = palette, drop = FALSE) +
-      labs(title = title_text, x = "UMAP_1", y = "UMAP_2", color = NULL) +
+      labs(title = title_text, x = "UMAP_1", y = "UMAP_2", color = label_col) +
+      guides(color = guide_legend(override.aes = list(size = 3.2, alpha = 1), ncol = legend_ncols)) +
       theme_bw(base_size = 11) +
       theme(
-        plot.title = element_text(face = "bold"),
-        legend.key.height = grid::unit(0.35, "cm"),
-        legend.text = element_text(size = 8)
+        plot.title = element_text(face = "bold", size = 14),
+        axis.title = element_text(size = 11),
+        axis.text = element_text(size = 9),
+        legend.position = "right",
+        legend.title = element_text(size = 11, face = "bold"),
+        legend.text = element_text(size = 9),
+        legend.key.height = grid::unit(0.38, "cm"),
+        legend.key.width = grid::unit(0.38, "cm"),
+        legend.spacing.y = grid::unit(0.05, "cm")
       )
   }
 
-  ggsave(filename = out_path, plot = plot_obj, width = 10, height = 8, units = "in", dpi = 150, limitsize = FALSE)
+  legend_ncols <- if (nrow(clean_df) == 0) 1 else if (length(unique(as.character(clean_df[[label_col]]))) >= 24) 3 else if (length(unique(as.character(clean_df[[label_col]]))) >= 12) 2 else 1
+  plot_width <- 10 + max(1.5, 0.9 * legend_ncols)
+  ggsave(filename = out_path, plot = plot_obj, width = plot_width, height = 8, units = "in", dpi = 150, limitsize = FALSE)
 }
 
 save_cima_umap_plot <- function(plot_df, label_col, palette, out_path, title_text) {
@@ -744,22 +760,34 @@ save_cima_umap_plot <- function(plot_df, label_col, palette, out_path, title_tex
     make_placeholder_plot(title_text, paste0("No values available for ", label_col))
   } else {
     clean_df[[label_col]] <- factor(clean_df[[label_col]], levels = names(palette))
+    observed_labels <- intersect(names(palette), unique(as.character(clean_df[[label_col]])))
+    legend_ncols <- if (length(observed_labels) >= 24) 3 else if (length(observed_labels) >= 12) 2 else 1
     ggplot(clean_df, aes(x = UMAP_1, y = UMAP_2, color = .data[[label_col]])) +
       geom_point(size = 0.25, alpha = 0.85) +
       scale_color_manual(values = palette, drop = FALSE) +
-      labs(title = title_text, x = "UMAP_1", y = "UMAP_2", color = NULL) +
+      labs(title = title_text, x = "UMAP_1", y = "UMAP_2", color = label_col) +
+      guides(color = guide_legend(override.aes = list(size = 3.2, alpha = 1), ncol = legend_ncols)) +
       theme_bw(base_size = 11) +
       theme(
-        plot.title = element_text(face = "bold"),
-        legend.key.height = grid::unit(0.35, "cm"),
-        legend.text = element_text(size = 8)
+        plot.title = element_text(face = "bold", size = 14),
+        axis.title = element_text(size = 11),
+        axis.text = element_text(size = 9),
+        legend.position = "right",
+        legend.title = element_text(size = 11, face = "bold"),
+        legend.text = element_text(size = 9),
+        legend.key.height = grid::unit(0.38, "cm"),
+        legend.key.width = grid::unit(0.38, "cm"),
+        legend.spacing.y = grid::unit(0.05, "cm")
       )
   }
 
+  observed_count <- if (nrow(clean_df) == 0) 0 else length(intersect(names(palette), unique(as.character(clean_df[[label_col]]))))
+  legend_ncols <- if (observed_count >= 24) 3 else if (observed_count >= 12) 2 else 1
+  plot_width <- 10 + max(1.5, 0.9 * legend_ncols)
   ggsave(
     filename = out_path,
     plot = plot_obj,
-    width = 10,
+    width = plot_width,
     height = 8,
     units = "in",
     dpi = 150,
@@ -890,7 +918,11 @@ option_list <- list(
   make_option(c("--individual-id"), type = "character", default = "", help = "Individual ID for paired multi-omics linkage"),
   make_option(c("--nmads"), type = "numeric", default = 4, help = "MAD multiplier"),
   make_option(c("--output-profile"), type = "character", default = "full", help = "Output profile: full or matrix-lite"),
-  make_option(c("--output-root"), type = "character", default = file.path(project_root, "output"), help = "Output root directory")
+  make_option(c("--output-root"), type = "character", default = file.path(project_root, "output"), help = "Output root directory"),
+  make_option(c("--fragment-file"), type = "character", default = "", help = "Explicit fragment file path for non-standard sample layouts"),
+  make_option(c("--sample-label"), type = "character", default = "", help = "Display/project label when using an explicit fragment file"),
+  make_option(c("--min-inferred-fragments"), type = "numeric", default = NA_real_, help = "Override minimum fragments for fragment-count barcode inference"),
+  make_option(c("--max-inferred-barcodes"), type = "integer", default = NA_integer_, help = "Override maximum barcodes for fragment-count barcode inference")
 )
 
 opt_parser <- OptionParser(option_list = option_list)
@@ -1035,10 +1067,15 @@ make_barcode_density_plot <- function(fragment_stats, floor_auto, candidate_thre
     theme_bw(base_size = 11)
 }
 
-fragment_file <- find_single_file(raw_dir, opt$gsm, "fragments", required = TRUE)
+fragment_file <- if (nzchar(opt$`fragment-file`)) {
+  normalizePath(opt$`fragment-file`, winslash = "/", mustWork = TRUE)
+} else {
+  find_single_file(raw_dir, opt$gsm, "fragments", required = TRUE)
+}
 barcode_file <- find_single_file(raw_dir, opt$gsm, "filtered_barcodes", required = FALSE)
 filtered_metadata_file <- find_single_file(raw_dir, opt$gsm, "filtered_metadata", required = FALSE, exts = c("csv", "tsv"))
 singlecell_file <- find_single_file(raw_dir, opt$gsm, "singlecell", required = FALSE, exts = c("csv", "tsv"))
+sample_label <- if (nzchar(opt$`sample-label`)) opt$`sample-label` else opt$gsm
 
 cat(rep("=", 80), "\n", sep = "")
 cat("scATAC-seq Single Sample QC\n")
@@ -1088,7 +1125,7 @@ if (!is.null(barcode_file)) {
   barcode_density_plot <- make_placeholder_plot("Barcode Count Density", paste0("Using ", singlecell$selector_source))
 } else {
   cat("Barcode file: not found, inferring initial barcode set from fragment counts\n\n")
-  inferred <- infer_barcodes(fragment_file)
+  inferred <- infer_barcodes(fragment_file, opt$`min-inferred-fragments`, opt$`max-inferred-barcodes`)
   barcodes <- inferred$barcodes
   barcode_source <- "prefiltered_from_fragments"
   barcode_knee_threshold <- inferred$knee_threshold
@@ -1196,10 +1233,10 @@ slot(atac_assay, "annotation") <- annotations
 atac_obj <- CreateSeuratObject(
   counts = atac_assay,
   assay = "ATAC",
-  project = opt$gsm
+  project = sample_label
 )
 
-atac_obj$sample <- opt$gsm
+atac_obj$sample <- sample_label
 atac_obj$dataset <- opt$gse
 atac_obj$barcode_source <- barcode_source
 
@@ -1322,13 +1359,7 @@ cat("Cells after QC:", length(qc_cells), "\n")
 cat("QC rate:", sprintf("%.2f%%", length(qc_cells) / nrow(meta_data) * 100), "\n\n")
 
 umap_l1_file <- file.path(output_dir, "umap_cima_cell_type_l1.png")
-umap_l1_query_file <- file.path(output_dir, "umap_atac_cima_cell_type_l1.png")
-umap_l1_query_masked_file <- file.path(output_dir, "umap_atac_cima_cell_type_l1_masked.png")
-umap_l1_query_consensus_file <- file.path(output_dir, "umap_atac_cima_cell_type_l1_consensus.png")
 umap_l2_file <- file.path(output_dir, "umap_cima_cell_type_l2.png")
-umap_l3_file <- file.path(output_dir, "umap_cima_cell_type_l3.png")
-umap_l4_file <- file.path(output_dir, "umap_cima_cell_type_l4.png")
-umap_cluster_file <- file.path(output_dir, "umap_atac_clusters.png")
 
 cat("[8/10] Assigning CIMA labels...\n")
 annotation_result <- annotate_cima_reference_model(qc_counts, cima_hierarchy, cima_feature_model, cima_centroids)
@@ -1388,11 +1419,6 @@ if (length(qc_cells) >= 3) {
     query_umap_df$cima_l1_cluster_purity <- NA_real_
     atac_obj@meta.data[query_umap_df$cell_barcode, "cima_cell_type_l1_cluster_consensus"] <- query_umap_df$cima_cell_type_l1_cluster_consensus
     atac_obj@meta.data[query_umap_df$cell_barcode, "cima_l1_cluster_purity"] <- query_umap_df$cima_l1_cluster_purity
-    save_query_umap_plot(query_umap_df, "seurat_clusters", umap_cluster_file, paste0(opt$gsm, " UMAP by ATAC cluster"))
-    save_cima_umap_plot(query_umap_df, "cima_cell_type_l1", cima_palettes$cima_cell_type_l1, umap_l1_query_file, paste0(opt$gsm, " query-native UMAP by CIMA L1"))
-    l1_masked_palette <- c(cima_palettes$cima_cell_type_l1, Unknown = "#7F7F7F")
-    save_cima_umap_plot(query_umap_df, "cima_cell_type_l1_masked", l1_masked_palette, umap_l1_query_masked_file, paste0(opt$gsm, " query-native UMAP by CIMA L1 (masked)"))
-    save_cima_umap_plot(query_umap_df, "cima_cell_type_l1_cluster_consensus", l1_masked_palette, umap_l1_query_consensus_file, paste0(opt$gsm, " query-native UMAP by CIMA L1 (pointwise masked)"))
     umap_plot_df <- query_umap_df
   }
 
@@ -1441,8 +1467,6 @@ if (is.null(umap_plot_df)) {
 
 save_cima_umap_plot(umap_plot_df, "cima_cell_type_l1", cima_palettes$cima_cell_type_l1, umap_l1_file, paste0(opt$gsm, " UMAP by CIMA L1"))
 save_cima_umap_plot(umap_plot_df, "cima_cell_type_l2", cima_palettes$cima_cell_type_l2, umap_l2_file, paste0(opt$gsm, " UMAP by CIMA L2"))
-save_cima_umap_plot(umap_plot_df, "cima_cell_type_l3", cima_palettes$cima_cell_type_l3, umap_l3_file, paste0(opt$gsm, " UMAP by CIMA L3"))
-save_cima_umap_plot(umap_plot_df, "cima_cell_type_l4", cima_palettes$cima_cell_type_l4, umap_l4_file, paste0(opt$gsm, " UMAP by CIMA L4"))
 
 cat("[10/10] Building QC overview figure...\n")
 p1 <- safe_plot(
@@ -1676,22 +1700,16 @@ if (!is_lite_output) {
   write.csv(metadata_qc, metadata_qc_file, row.names = FALSE)
   saveRDS(atac_obj, rds_file)
 } else {
-  suppressWarnings(file.remove(qc_plot_file, umap_l2_file, umap_l3_file, umap_l4_file))
+  suppressWarnings(file.remove(qc_plot_file, umap_l2_file))
 }
 
 cat("UMAP L1:", umap_l1_file, "\n")
-if (file.exists(umap_l1_query_file)) cat("UMAP L1 query-native:", umap_l1_query_file, "\n")
-if (file.exists(umap_l1_query_masked_file)) cat("UMAP L1 query-native masked:", umap_l1_query_masked_file, "\n")
-if (file.exists(umap_l1_query_consensus_file)) cat("UMAP L1 query-native consensus:", umap_l1_query_consensus_file, "\n")
+cat("UMAP L2:", umap_l2_file, "\n")
 cat("Summary:", summary_file, "\n")
 cat("Validation result:", validation_file, "\n")
 cat("QC matrix:", matrix_file, "\n")
 if (!is_lite_output) {
   cat("QC overview:", qc_plot_file, "\n")
-cat("UMAP L2:", umap_l2_file, "\n")
-cat("UMAP L3:", umap_l3_file, "\n")
-cat("UMAP L4:", umap_l4_file, "\n")
-if (file.exists(umap_cluster_file)) cat("UMAP clusters:", umap_cluster_file, "\n")
 cat("Metadata:", metadata_file, "\n")
   cat("QC metadata:", metadata_qc_file, "\n")
   cat("RDS:", rds_file, "\n")
