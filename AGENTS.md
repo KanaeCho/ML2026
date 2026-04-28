@@ -29,14 +29,11 @@
   - tuning 当前只执行固定 candidate：`baseline__baseline__baseline`
   - 该 candidate 会真实执行单样本主线（读取矩阵、QC、doublet、embedding、Azimuth、样本输出），不是占位 stub
 - `GSE226039` 当前按文件名只保留 `PBMC` 样本参与 RNA 发现与运行，不把 Ileum / Rectum 组织一起纳入本分支主线。
-- 当前已下载 `co2` 共测数据集 `GSE206284` 的 RNA / ATAC 原始文件；其 `data/reference/co2_sample_manifest.csv` 与 `data/reference/co2_rna_atac_pairing.csv` 当前作为共测样本桥表保留 `individual_id`，但因数据质量不满足当前共测验收要求，`co2` 不再作为本分支主线处理对象。
-- 当前 `only_rna` 对 `GSE206284` 的 RNA 发现与读入已支持从 `co2_sample_manifest.csv` 注入 `individual_id`，并会写入 RNA `metadata.csv` / `metadata_qc.csv`。
-- 当前 `process_single_sample.R` 已支持 `--individual-id`，`pipeline.py run-sample` 会把 `GSE206284` ATAC 样本的 `individual_id` 传入，并写入 ATAC `metadata.csv` / `metadata_qc.csv`。
-- 当前 `GSE206284` 的 ATAC 原始 `scATAC_prfragments.tar.gz` 已验证内含 `fragments.tsv.gz + .tbi`；现通过解包并补回 `GSM` 前缀后，可被现有 ATAC `discover` / `run-sample` 识别。
 - 当前新增 `scripts/co/` 共测子系统；`co-run-atac-*` 会把共测 ATAC 样本包装后复用 `scripts/process/process_single_sample.R` 的 only_atac 主线，并输出到 `output/co/atac/`。
-- 当前 `co-run-atac-sample` 已在 `GSE206284/GSM6254833` smoke 通过；切换为 only_atac 主线路由后，co-ATAC 输出契约聚焦 CIMA ATAC L1/L2 注释和 reference-space UMAP，不再输出 `umap_atac_*` query-native 图。
+- `co2` / `GSE206284` 已从当前工作区清理：`data/reference/co2_sample_manifest.csv`、`data/reference/co2_rna_atac_pairing.csv`、`data/raw/GSE206284/` 以及对应 RNA/ATAC 输出目录均不再保留。
 - 当前 `co1` 共测数据集 `7555405` 已接入 `scripts/co/`：原始样本目录与 pipeline 发现 / 输出均使用英文 `sample_id`（如 `donorA_Day0`）。
 - 当前 `co1` / `7555405` 共测分支任务已完成：24 个样本的 RNA 输出位于 `output/co/rna/7555405/`，24 个样本的 ATAC 输出位于 `output/co/atac/7555405/`，co-ATAC 状态均为 `success` 且 `outputs_complete=true`。
+- 当前整合分支新增内存受控的 product-level low-dimensional integration 工作流：通过 `uv run python scripts/process/pipeline.py organize-products --products all --copy-mode symlink` 生成 `output/1.only_atac/`、`output/2.only_rna/`、`output/3.co_atac/`、`output/4.co_rna/`。该工作流严格不合并全量 count matrix；RNA 逐样本按全基因 library size 做 `normalize_total(1e4)`，对 CIMA feature 做 `log1p` 后投影到 CIMA RNA PCA compact feature 空间，ATAC 逐样本投影到 CIMA ATAC LSI compact feature 空间，只在 product 层合并低维 `float32` embedding。RNA product 默认对低维 embedding 执行 Harmony 校正后，再用 Scanpy neighbors + UMAP + Leiden 写回真实 `integrated_umap_1/2` 与 `integrated_cluster`；ATAC product 默认仍使用 BBKNN + Scanpy UMAP + Scanpy Leiden。only_rna 默认只让 `integrated_cima_l1_score >= 0.5` 的高置信 RNA 细胞参与 product-level UMAP / Leiden，以减少低置信 CIMA 投影细胞造成的桥状结构；低置信细胞仍保留在 product metadata 中，并通过 `integration_included=false` 与 `integration_exclusion_reason=low_integrated_cima_l1_score` 审计。若输出挂载点不允许 symlink，则写入 `SOURCE_OUTPUT_DIR.txt` pointer 指向原始样本目录，避免复制大矩阵导致内存/磁盘压力。
 
 ## 目录结构
 
@@ -101,7 +98,7 @@
     - 其内部仍沿用常规单样本输出族（`metadata.csv`、`qc_summary.csv`、`.h5ad`、UMAP 图等）
 - 仓库中旧有的 ATAC / TEA-seq 输出仍位于：
   - `output/{GSE}/{GSM}/`
-  - `output/1.only_atac/`
+  - `output/1.only_atac/`（旧 accepted integration 输出已由当前 only_atac product 接管）
   - `output/GSE214546/qc_audit/`
   但这些目录不属于本分支 RNA 第一阶段验收主线。
 - 共测 ATAC 输出目录：`output/co/atac/{GSE}/{GSM}/`
@@ -119,6 +116,26 @@
   - `matrix/features.tsv.gz`
   - `{GSM}_seurat_qc.rds`
   - `run_status.json`
+- 当前 integrated product 输出目录：
+  - `output/1.only_atac/`：聚合 legacy only_atac 样本输出 `output/{GSE}/{GSM}/`，排除 `output/rna/`、`output/co/`、当前 product 目录、TEA-seq 目录和 co2 `GSE206284`；legacy ATAC cell metadata 来源为 `validation_result.csv`。
+  - `output/2.only_rna/`：聚合 `output/rna/{GSE}/{sample_id}/` 下已完成的 only_rna RNA 样本，跳过 tuning candidate 嵌套输出，并在 product 层排除 co2 `GSE206284`。
+  - `output/3.co_atac/`：聚合 `output/co/atac/7555405/{sample_id}/` 的 co1 ATAC 样本。
+  - `output/4.co_rna/`：聚合 `output/co/rna/7555405/{sample_id}/` 的 co1 RNA 样本。
+- 每个 integrated product 目录至少包含：
+  - `product_status.json`
+  - `manifests/samples.csv`
+  - `manifests/cells_metadata.csv`
+  - `manifests/output_files.csv`
+  - `qc/sample_qc_summary.csv`
+  - `qc/validation_summary.csv`
+  - `{product}.h5ad`（metadata-only 对象，不含表达/peak count matrix）
+  - `integration/integration_summary.json`
+  - `integration/integration_metrics.csv`
+  - `integration/sample_mixing_summary.csv`
+  - `figures/*_cima_l1_panels.png`、`figures/*_cima_l2_panels.png`、`figures/*_integrated_cluster_panels.png`、`figures/*_gse_panels.png`、`figures/*_sample_panels.png`
+- integrated product 的 cell metadata 会追加并保留追踪字段：`product`、`branch`、`modality`、`gse`、`sample_id`、`individual_id`、`source_output_dir`、`source_cell_id`、`global_cell_id`、`is_co_sample`、`co_dataset`、`co_dataset_id`。
+- integrated product 的 cell metadata 还会写入真实 product-level 整合字段：`integrated_umap_1`、`integrated_umap_2`、`integrated_cluster`、`integration_method`、`integration_feature_space`、`integration_included`、`integration_exclusion_reason`。RNA product 还会基于同一个 CIMA RNA PCA embedding 和 reference centroids 写入 `integrated_cima_l1`、`integrated_cima_l1_score`、`integrated_cima_l2`、`integrated_cima_l2_score`，用于检查与整合空间一致的 CIMA label。only_rna 中低于默认 CIMA L1 置信阈值的细胞保留 `integrated_cima_l1/l2` 诊断标签，但不写入 product-level `integrated_umap_1/2` 和 `integrated_cluster`。panel 图优先使用 `integrated_umap_1/2`，不再使用 per-sample UMAP 或 reference UMAP 作为主验收坐标，且会自然跳过缺少 integrated 坐标的低置信细胞。
+- integrated product 当前不执行 co1 RNA+ATAC 跨模态整合，不做联合 embedding，不做 paired-cell matching，也不做 RNA-to-ATAC label transfer。
 
 ## 当前主线脚本
 
@@ -164,11 +181,40 @@
   - `co-run-rna-gse`
   - `co-run-atac-sample`
   - `co-run-atac-gse`
+- 当前支持的整合产品命令：
+  - `organize-products`
 - 共测命令当前行为：
-  - `co-discover` 基于 `data/reference/co2_sample_manifest.csv` 与 `data/raw/7555405/sample_layout.tsv` 同时列出 RNA 与 ATAC 样本，并显示 `individual_id`
+  - `co-discover` 当前基于 `data/raw/7555405/sample_layout.tsv` 列出 co1 RNA 与 ATAC 样本，并显示 `individual_id`；若历史 `co2_sample_manifest.csv` 不存在则自然跳过 co2
   - `co-run-rna-*` 复用 `scripts.only_rna.cli` 的 RNA 单样本流程，默认输出根为 `output/co/rna/`
   - `co-run-atac-*` 复用 `scripts/process/process_single_sample.R` 的 only_atac 主线，默认输出根为 `output/co/atac/`；`co-run-atac-gse` 支持 `--jobs` 并行处理样本
   - `co-status` 当前只检查 co-ATAC only_atac 输出完整性
+- `organize-products` 当前行为：
+  - 默认命令为 `uv run python scripts/process/pipeline.py organize-products --products all --copy-mode symlink`
+  - `--products` 支持 `only_atac`、`only_rna`、`co_atac`、`co_rna`、`all`
+  - `--copy-mode` 支持 `symlink` 与 `copy`，默认 `symlink`；若挂载点禁止 symlink，会自动降级为 `SOURCE_OUTPUT_DIR.txt` pointer，不复制大文件
+  - 默认执行真实 product-level 低维整合，并写入 `integrated_umap_1/2` 与 `integrated_cluster`
+  - 默认整合方法按 product 区分：RNA product 默认 `--integration-method harmony`，ATAC product 默认 `--integration-method bbknn`；`--integration-method scanpy_neighbors` 可用于普通 Scanpy neighbors fallback
+  - `--skip-integration` 才会跳过整合；此时只生成 metadata-level product，不作为当前整合验收通过状态
+  - `--skip-figures` 只跳过 panel 渲染，不跳过 integration
+  - `--integration-n-components`、`--integration-max-umap-fit-cells`、`--integration-clusters`、`--integration-batch-key`、`--bbknn-neighbors-within-batch`、`--bbknn-trim`、`--leiden-resolution`、`--rna-min-cima-l1-score` 控制低维整合参数
+  - 为控制内存，该命令按 product 串行处理，不合并表达矩阵或 peak matrix；RNA/ATAC 均按样本逐个投影为低维 `float32` embedding，product 层只合并低维 embedding
+
+### `scripts/process/organize_integrated_products.py`
+- 当前整合产品组织器，负责发现四类已注释样本输出、校验必要文件、写出 product manifest、调用低维整合引擎、生成 metadata-only `.h5ad` 和调用 panel renderer。
+- 当前真实生成状态：`output/1.only_atac/` 为 70/70 样本、409532 个 QC 后细胞；`output/2.only_rna/` 为 35/35 样本、386313 个 QC 后细胞；`output/3.co_atac/` 为 24/24 样本、69813 个 QC 后细胞；`output/4.co_rna/` 为 24/24 样本、98670 个 QC 后细胞。
+
+### `scripts/process/integrate_product_embeddings.py`
+- 当前 product-level 低维整合引擎。
+- RNA product 使用样本 `.h5ad` 与 `cima_rna_reference_pca_features.tsv.gz`，逐样本对 pass-QC 细胞按全基因 count 总量执行 `normalize_total(1e4)`，对 CIMA feature 子集执行 `log1p`，再用 CIMA reference feature model 的 `gene_mean/gene_std` 标准化后投影到 CIMA RNA PCA compact feature 空间。only_rna 默认 `--integration-method harmony`、`--integration-batch-key gse`、`--rna-min-cima-l1-score 0.5`；co_rna 默认 `--integration-method harmony`、`--integration-batch-key sample_id`，不启用 only_rna 的 CIMA L1 置信过滤；ATAC product 默认仍使用 `--integration-method bbknn`、`sample_id` 批次和原 BBKNN 参数。
+- ATAC product 使用样本 `matrix/matrix.mtx`、barcode/feature 文件与 `cima_atac_reference_lsi_features.tsv.gz`，逐样本投影到 CIMA ATAC LSI compact feature 空间。
+- product 层对低维 embedding 执行所选整合后写出 Scanpy UMAP 和 Scanpy Leiden cluster；RNA product 当前默认是 Harmony 校正后的 `X_harmony` 邻接图，ATAC 当前默认是 BBKNN graph。整合输出包括 `integration/integration_summary.json`、`integration/integration_metrics.csv`、`integration/sample_mixing_summary.csv`。
+- RNA product 会额外用 CIMA RNA L1/L2 centroid 对低维 embedding 做余弦最近质心赋值，写入 `integrated_cima_l1/l2`。RNA 单样本主注释仍来自 Azimuth `pbmcref`；`integrated_cima_l1/l2` 是 CIMA projection-space nearest-centroid 诊断标签，不替代 pbmcref 主注释。当前诊断显示 only_rna 中低 `integrated_cima_l1_score` 细胞会造成明显桥状结构，因此 only_rna 默认仅用高置信投影细胞拟合 product-level UMAP / Leiden，低置信细胞不进入整合图但保留审计字段。
+- 当前真实整合指标：`only_atac` 混合邻居比例 0.9988、15 clusters；`only_rna` 共有 386313 个 QC 后细胞，其中 288324 个高置信细胞参与 Harmony product-level 整合、97989 个低置信细胞保留 metadata 但不参与 UMAP/Leiden，混合邻居比例 0.9750、14 clusters、`integrated_cima_l1` cluster purity 0.8271、`integrated_cima_l2` cluster purity 0.5911；`co_atac` 混合邻居比例 1.0000、12 clusters；`co_rna` 98670 个 QC 后细胞全部参与 Harmony product-level 整合，混合邻居比例 1.0000、13 clusters、`integrated_cima_l1` cluster purity 0.8013、`integrated_cima_l2` cluster purity 0.5803。四个 product 的 `integrated_equals_original_umap` 均为 `false`。
+
+### `scripts/process/render_product_umap_panels.py`
+- 当前 integrated product panel 图渲染器沿用旧 accepted integration 的视觉规范：灰色背景点、按类别高亮、panel 标题包含 `n=`、rasterized scatter、CIMA L1 基础配色和 L2 阶梯色。
+- 坐标列优先级为 `integrated_umap_1/2`、`cima_ref_umap_1/2`、`umap_atac_1/2`、`umap_1/2`；当前主验收要求使用 `integrated_umap_1/2`。若缺坐标列则在 `product_status.json` 中记录跳过原因，不伪造 UMAP。
+- 当前每个 product 额外输出 `*_integrated_cluster_panels.png`，用于检查真实整合后的 cluster 结构。
 
 ### `scripts/co/`
 - 当前共测子系统已实现：

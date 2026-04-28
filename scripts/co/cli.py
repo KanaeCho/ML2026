@@ -54,7 +54,7 @@ def _raw_root() -> Path:
 def _load_manifest(gse: str | None = None) -> pd.DataFrame:
     manifest = _manifest_path()
     if not manifest.exists():
-        raise FileNotFoundError(f"co2 manifest not found: {manifest}")
+        return pd.DataFrame(columns=["gse", "gsm", "assay", "individual_id", "health_status", "is_pbmc"])
     df = pd.read_csv(manifest).fillna("")
     if gse is not None:
         df = df.loc[df["gse"].astype(str) == gse].copy()
