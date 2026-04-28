@@ -64,14 +64,14 @@ EXCLUDED_OUTPUT_NAMES = {
     "rna",
 }
 EXCLUDED_ONLY_ATAC_GSES = {
-    # GSE206284 is the co2 dataset retained for bridge/audit work, not part of
-    # the accepted legacy only_atac product. Including it creates isolated
+    # GSE206284 is the removed co2 dataset, not part of the accepted legacy
+    # only_atac product. Including it creates isolated
     # sample-driven structures in product-level integration.
     "GSE206284",
 }
 EXCLUDED_ONLY_RNA_GSES = {
-    # GSE206284 is co2 and is retained outside the first-pass product
-    # integration products. It should not dominate the only_rna product.
+    # GSE206284 is the removed co2 dataset and should not enter only_rna
+    # product integration if stale outputs are present on disk.
     "GSE206284",
 }
 COMMON_REQUIRED = [

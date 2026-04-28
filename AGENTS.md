@@ -29,12 +29,8 @@
   - tuning 当前只执行固定 candidate：`baseline__baseline__baseline`
   - 该 candidate 会真实执行单样本主线（读取矩阵、QC、doublet、embedding、Azimuth、样本输出），不是占位 stub
 - `GSE226039` 当前按文件名只保留 `PBMC` 样本参与 RNA 发现与运行，不把 Ileum / Rectum 组织一起纳入本分支主线。
-- 当前已下载 `co2` 共测数据集 `GSE206284` 的 RNA / ATAC 原始文件；其 `data/reference/co2_sample_manifest.csv` 与 `data/reference/co2_rna_atac_pairing.csv` 当前作为共测样本桥表保留 `individual_id`，但因数据质量不满足当前共测验收要求，`co2` 不再作为本分支主线处理对象。
-- 当前 `only_rna` 对 `GSE206284` 的 RNA 发现与读入已支持从 `co2_sample_manifest.csv` 注入 `individual_id`，并会写入 RNA `metadata.csv` / `metadata_qc.csv`。
-- 当前 `process_single_sample.R` 已支持 `--individual-id`，`pipeline.py run-sample` 会把 `GSE206284` ATAC 样本的 `individual_id` 传入，并写入 ATAC `metadata.csv` / `metadata_qc.csv`。
-- 当前 `GSE206284` 的 ATAC 原始 `scATAC_prfragments.tar.gz` 已验证内含 `fragments.tsv.gz + .tbi`；现通过解包并补回 `GSM` 前缀后，可被现有 ATAC `discover` / `run-sample` 识别。
 - 当前新增 `scripts/co/` 共测子系统；`co-run-atac-*` 会把共测 ATAC 样本包装后复用 `scripts/process/process_single_sample.R` 的 only_atac 主线，并输出到 `output/co/atac/`。
-- 当前 `co-run-atac-sample` 已在 `GSE206284/GSM6254833` smoke 通过；切换为 only_atac 主线路由后，co-ATAC 输出契约聚焦 CIMA ATAC L1/L2 注释和 reference-space UMAP，不再输出 `umap_atac_*` query-native 图。
+- `co2` / `GSE206284` 已从当前工作区清理：`data/reference/co2_sample_manifest.csv`、`data/reference/co2_rna_atac_pairing.csv`、`data/raw/GSE206284/` 以及对应 RNA/ATAC 输出目录均不再保留。
 - 当前 `co1` 共测数据集 `7555405` 已接入 `scripts/co/`：原始样本目录与 pipeline 发现 / 输出均使用英文 `sample_id`（如 `donorA_Day0`）。
 - 当前 `co1` / `7555405` 共测分支任务已完成：24 个样本的 RNA 输出位于 `output/co/rna/7555405/`，24 个样本的 ATAC 输出位于 `output/co/atac/7555405/`，co-ATAC 状态均为 `success` 且 `outputs_complete=true`。
 - 当前整合分支新增内存受控的 product-level low-dimensional integration 工作流：通过 `uv run python scripts/process/pipeline.py organize-products --products all --copy-mode symlink` 生成 `output/1.only_atac/`、`output/2.only_rna/`、`output/3.co_atac/`、`output/4.co_rna/`。该工作流严格不合并全量 count matrix；RNA 逐样本按全基因 library size 做 `normalize_total(1e4)`，对 CIMA feature 做 `log1p` 后投影到 CIMA RNA PCA compact feature 空间，ATAC 逐样本投影到 CIMA ATAC LSI compact feature 空间，只在 product 层合并低维 `float32` embedding。RNA product 默认对低维 embedding 执行 Harmony 校正后，再用 Scanpy neighbors + UMAP + Leiden 写回真实 `integrated_umap_1/2` 与 `integrated_cluster`；ATAC product 默认仍使用 BBKNN + Scanpy UMAP + Scanpy Leiden。only_rna 默认只让 `integrated_cima_l1_score >= 0.5` 的高置信 RNA 细胞参与 product-level UMAP / Leiden，以减少低置信 CIMA 投影细胞造成的桥状结构；低置信细胞仍保留在 product metadata 中，并通过 `integration_included=false` 与 `integration_exclusion_reason=low_integrated_cima_l1_score` 审计。若输出挂载点不允许 symlink，则写入 `SOURCE_OUTPUT_DIR.txt` pointer 指向原始样本目录，避免复制大矩阵导致内存/磁盘压力。
@@ -188,7 +184,7 @@
 - 当前支持的整合产品命令：
   - `organize-products`
 - 共测命令当前行为：
-  - `co-discover` 基于 `data/reference/co2_sample_manifest.csv` 与 `data/raw/7555405/sample_layout.tsv` 同时列出 RNA 与 ATAC 样本，并显示 `individual_id`
+  - `co-discover` 当前基于 `data/raw/7555405/sample_layout.tsv` 列出 co1 RNA 与 ATAC 样本，并显示 `individual_id`；若历史 `co2_sample_manifest.csv` 不存在则自然跳过 co2
   - `co-run-rna-*` 复用 `scripts.only_rna.cli` 的 RNA 单样本流程，默认输出根为 `output/co/rna/`
   - `co-run-atac-*` 复用 `scripts/process/process_single_sample.R` 的 only_atac 主线，默认输出根为 `output/co/atac/`；`co-run-atac-gse` 支持 `--jobs` 并行处理样本
   - `co-status` 当前只检查 co-ATAC only_atac 输出完整性
