@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.co import cli as co_cli
 from scripts.only_rna import cli as only_rna_cli
+from scripts.process import organize_integrated_products
 
 DEFAULT_DATA_ROOT = Path("/mnt/g/ML2026_data")
 
@@ -965,6 +966,39 @@ def build_parser() -> argparse.ArgumentParser:
     tea_seq_parser.add_argument("--margin-threshold", type=float, default=0.1)
     tea_seq_parser.add_argument("--low-purity-threshold", type=float, default=0.8)
 
+    organize_products_parser = subparsers.add_parser(
+        "organize-products",
+        help="Organize annotated branch outputs into integrated product directories",
+    )
+    organize_products_parser.add_argument(
+        "--products",
+        default="all",
+        help="Comma-separated products: only_atac,only_rna,co_atac,co_rna,all",
+    )
+    organize_products_parser.add_argument("--output-root", default=str(OUTPUT_DIR))
+    organize_products_parser.add_argument(
+        "--copy-mode", choices=["symlink", "copy"], default="symlink"
+    )
+    organize_products_parser.add_argument("--force", action="store_true")
+    organize_products_parser.add_argument("--skip-figures", action="store_true")
+    organize_products_parser.add_argument("--skip-integration", action="store_true")
+    organize_products_parser.add_argument("--integration-n-components", type=int, default=30)
+    organize_products_parser.add_argument(
+        "--integration-max-umap-fit-cells", type=int, default=100_000
+    )
+    organize_products_parser.add_argument("--integration-clusters", type=int, default=30)
+    organize_products_parser.add_argument("--integration-batch-key", default=None)
+    organize_products_parser.add_argument(
+        "--integration-method",
+        choices=["bbknn", "scanpy_neighbors", "harmony"],
+        default=None,
+    )
+    organize_products_parser.add_argument("--bbknn-neighbors-within-batch", type=int, default=None)
+    organize_products_parser.add_argument("--bbknn-trim", type=int, default=None)
+    organize_products_parser.add_argument("--leiden-resolution", type=float, default=1.0)
+    organize_products_parser.add_argument("--rna-min-cima-l1-score", type=float, default=None)
+    organize_products_parser.add_argument("--include-incomplete", action="store_true")
+
     return parser
 
 
@@ -1014,6 +1048,9 @@ def main() -> int:
             margin_threshold=args.margin_threshold,
             low_purity_threshold=args.low_purity_threshold,
         )
+
+    if args.command == "organize-products":
+        return organize_integrated_products.cmd_organize_products(args)
 
     if args.command == "run-sample":
         sample = find_sample(args.gse, args.gsm)
