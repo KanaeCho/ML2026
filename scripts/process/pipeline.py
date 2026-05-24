@@ -19,6 +19,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.co import cli as co_cli
+from scripts.longevity import cli as longevity_cli
+from scripts.only_rna import backfill_final_celltype
 from scripts.only_rna import cli as only_rna_cli
 from scripts.process import organize_integrated_products
 
@@ -49,15 +51,26 @@ def resolve_data_root(
     raise FileNotFoundError(f"Unable to resolve data root. Searched: {searched}")
 
 
-DATA_ROOT = resolve_data_root()
+def default_data_root_path(project_root: Path = ROOT) -> Path:
+    workspace_data = project_root / "data"
+    if workspace_data.exists():
+        return workspace_data
+    env_root = os.environ.get("ML2026_DATA_ROOT")
+    return Path(env_root) if env_root else DEFAULT_DATA_ROOT
+
+
+DATA_ROOT = default_data_root_path()
 RAW_DIR = DATA_ROOT / "raw"
 OUTPUT_DIR = ROOT / "output"
+ATAC_OUTPUT_DIR = OUTPUT_DIR / "atac"
 R_SCRIPT = ROOT / "scripts" / "process" / "process_single_sample.R"
 RNA_R_SCRIPT = ROOT / "scripts" / "process" / "process_single_rna_sample.R"
 DOWNLOAD_SCRIPT = ROOT / "scripts" / "process" / "download_from_datasets.py"
 TEA_SEQ_AUDIT_SCRIPT = ROOT / "scripts" / "process" / "organize_tea_seq_outputs.py"
+EXPORT_ATAC_H5AD_SCRIPT = ROOT / "scripts" / "process" / "export_co_atac_h5ad.py"
 FRAGMENT_RE = re.compile(r"^(GSM\d+)_.*fragments.*\.tsv\.gz$")
 RNA_OUTPUT_DIR = OUTPUT_DIR / "rna"
+ATAC_WORKBOOK = DATA_ROOT / "reference" / "atac.xlsx"
 
 
 @dataclass(frozen=True)
@@ -69,7 +82,7 @@ class Sample:
 
     @property
     def output_dir(self) -> Path:
-        return OUTPUT_DIR / self.gse / self.gsm
+        return ATAC_OUTPUT_DIR / self.gse / self.gsm
 
     @property
     def log_file(self) -> Path:
@@ -127,30 +140,44 @@ def utc_now() -> str:
 def discover_samples(gse: str | None = None) -> list[Sample]:
     if not RAW_DIR.exists():
         raise FileNotFoundError(f"Raw data directory not found: {RAW_DIR}")
+    if not ATAC_WORKBOOK.exists():
+        raise FileNotFoundError(f"ATAC workbook not found: {ATAC_WORKBOOK}")
+
+    import pandas as pd
+
+    rules = pd.read_excel(ATAC_WORKBOOK, dtype=str).fillna("")
+    required_columns = {"sample", "dataset"}
+    missing_columns = required_columns - set(rules.columns)
+    if missing_columns:
+        raise ValueError(
+            f"ATAC workbook missing columns: {', '.join(sorted(missing_columns))}"
+        )
+    rules["sample"] = rules["sample"].astype(str).str.strip()
+    rules["dataset"] = rules["dataset"].astype(str).str.strip()
+    rules = rules[
+        rules["sample"].str.fullmatch(r"GSM\d+", na=False)
+        & rules["dataset"].str.fullmatch(r"GSE\d+", na=False)
+    ].copy()
+    if gse:
+        rules = rules.loc[rules["dataset"] == gse].copy()
+    selected = set(zip(rules["dataset"], rules["sample"], strict=False))
+    individual_map: dict[tuple[str, str], str] = {}
+    if "donor" in rules.columns:
+        for _, row in rules.iterrows():
+            donor = str(row.get("donor", "")).strip()
+            if donor:
+                individual_map[(str(row["dataset"]), str(row["sample"]))] = donor
 
     gse_dirs = (
         [RAW_DIR / gse]
         if gse
-        else sorted(path for path in RAW_DIR.iterdir() if path.is_dir())
+        else sorted(RAW_DIR / dataset for dataset in {key[0] for key in selected})
     )
     samples: list[Sample] = []
-    individual_map: dict[tuple[str, str], str] = {}
-    co2_manifest = DATA_ROOT / "reference" / "co2_sample_manifest.csv"
-    if co2_manifest.exists():
-        import pandas as pd
-
-        manifest = pd.read_csv(co2_manifest)
-        for _, row in manifest.iterrows():
-            gse_value = str(row.get("gse", "")).strip()
-            gsm_value = str(row.get("gsm", "")).strip()
-            assay_value = str(row.get("assay", "")).strip()
-            individual_value = str(row.get("individual_id", "")).strip()
-            if gse_value and gsm_value and individual_value and assay_value.startswith("ATAC"):
-                individual_map[(gse_value, gsm_value)] = individual_value
 
     for gse_dir in gse_dirs:
         if not gse_dir.exists():
-            raise FileNotFoundError(f"GSE directory not found: {gse_dir}")
+            continue
 
         by_gsm: dict[str, list[Path]] = {}
         for path in sorted(gse_dir.glob("*.tsv.gz")):
@@ -158,6 +185,8 @@ def discover_samples(gse: str | None = None) -> list[Sample]:
             if not match:
                 continue
             gsm = match.group(1)
+            if (gse_dir.name, gsm) not in selected:
+                continue
             by_gsm.setdefault(gsm, []).append(path)
 
         for gsm, matches in sorted(by_gsm.items()):
@@ -351,7 +380,7 @@ def rna_sample_status_file(sample: RNASample, output_root: Path) -> Path:
 
 
 def expected_outputs(
-    sample: Sample, output_profile: str = "full", output_root: Path = OUTPUT_DIR
+    sample: Sample, output_profile: str = "full", output_root: Path = ATAC_OUTPUT_DIR
 ) -> list[Path]:
     output_dir = sample_output_dir(sample, output_root)
     if output_profile in {"matrix-lite", "validation-lite"}:
@@ -360,9 +389,7 @@ def expected_outputs(
             output_dir / "umap_cima_cell_type_l2.png",
             output_dir / "qc_summary.csv",
             output_dir / "validation_result.csv",
-            output_dir / "matrix" / "matrix.mtx",
-            output_dir / "matrix" / "barcodes.tsv",
-            output_dir / "matrix" / "features.tsv",
+            output_dir / f"{sample.gsm}.h5ad",
         ]
 
     return [
@@ -372,10 +399,7 @@ def expected_outputs(
         output_dir / "metadata.csv",
         output_dir / "metadata_qc.csv",
         output_dir / "qc_summary.csv",
-        output_dir / "matrix" / "matrix.mtx",
-        output_dir / "matrix" / "barcodes.tsv.gz",
-        output_dir / "matrix" / "features.tsv.gz",
-        output_dir / f"{sample.gsm}_seurat_qc.rds",
+        output_dir / f"{sample.gsm}.h5ad",
     ]
 
 
@@ -400,7 +424,7 @@ def expected_rna_outputs(
 
 
 def outputs_complete(
-    sample: Sample, output_profile: str = "full", output_root: Path = OUTPUT_DIR
+    sample: Sample, output_profile: str = "full", output_root: Path = ATAC_OUTPUT_DIR
 ) -> bool:
     return all(
         path.exists()
@@ -417,7 +441,7 @@ def rna_outputs_complete(sample: RNASample, output_root: Path = RNA_OUTPUT_DIR) 
 
 
 def load_status(
-    sample: Sample, output_root: Path = OUTPUT_DIR
+    sample: Sample, output_root: Path = ATAC_OUTPUT_DIR
 ) -> dict[str, Any] | None:
     status_file = sample_status_file(sample, output_root)
     if not status_file.exists():
@@ -426,7 +450,7 @@ def load_status(
 
 
 def write_status(
-    sample: Sample, payload: dict[str, Any], output_root: Path = OUTPUT_DIR
+    sample: Sample, payload: dict[str, Any], output_root: Path = ATAC_OUTPUT_DIR
 ) -> None:
     output_dir = sample_output_dir(sample, output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -494,6 +518,8 @@ def run_download(
     links_out: str,
     print_links: bool,
 ) -> int:
+    manifest_kind = "atac" if not manifest_csv and assay.lower() == "scatac" else "datasets"
+    xlsx_path = ATAC_WORKBOOK if manifest_kind == "atac" else DATA_ROOT / "reference" / "datasets.xlsx"
     log_dir = RAW_DIR / "_download_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     assay_tag = re.sub(r"[^A-Za-z0-9._-]+", "-", assay).strip("-") or "all-assays"
@@ -505,6 +531,10 @@ def run_download(
     command = [
         python_bin,
         str(DOWNLOAD_SCRIPT),
+        "--xlsx-path",
+        str(xlsx_path),
+        "--manifest-kind",
+        manifest_kind,
         "--file-kinds",
         file_kinds,
         "--aria2c",
@@ -700,7 +730,25 @@ def run_sample(
         write_status(sample, status_payload, output_root=output_root)
         return 0
 
-    returncode = run_command(command, sample_log_file(sample, output_root))
+    log_file = sample_log_file(sample, output_root)
+    returncode = run_command(command, log_file)
+    if returncode == 0:
+        export_command = [
+            sys.executable,
+            str(EXPORT_ATAC_H5AD_SCRIPT),
+            "--sample-dir",
+            str(sample_output_dir(sample, output_root)),
+            "--data-root",
+            str(DATA_ROOT),
+            "--overwrite",
+            "--cleanup",
+        ]
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write("\n[export-atac-h5ad]\n")
+            handle.write(" ".join(export_command) + "\n")
+        export_returncode = run_command(export_command, log_file)
+        if export_returncode != 0:
+            returncode = export_returncode
     status_payload["finished_at"] = utc_now()
     status_payload["returncode"] = returncode
     status_payload["outputs_complete"] = outputs_complete(
@@ -748,7 +796,7 @@ def print_status(samples: Iterable[Sample]) -> None:
         payload = load_status(sample) or {}
         status = payload.get("status", "pending")
         output_profile = payload.get("output_profile", "full")
-        output_root = Path(payload.get("output_root", str(OUTPUT_DIR)))
+        output_root = Path(payload.get("output_root", str(ATAC_OUTPUT_DIR)))
         finished_at = payload.get("finished_at", "")
         print(
             f"{sample.gse}\t{sample.gsm}\t{status}\t"
@@ -788,7 +836,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_sample_parser.add_argument("--nmads", type=float, default=4)
     run_sample_parser.add_argument("--rscript", default="Rscript")
     run_sample_parser.add_argument("--output-profile", default="full")
-    run_sample_parser.add_argument("--output-root", default=str(OUTPUT_DIR))
+    run_sample_parser.add_argument("--output-root", default=str(ATAC_OUTPUT_DIR))
     run_sample_parser.add_argument("--force", action="store_true")
     run_sample_parser.add_argument("--dry-run", action="store_true")
 
@@ -799,7 +847,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_gse_parser.add_argument("--nmads", type=float, default=4)
     run_gse_parser.add_argument("--rscript", default="Rscript")
     run_gse_parser.add_argument("--output-profile", default="full")
-    run_gse_parser.add_argument("--output-root", default=str(OUTPUT_DIR))
+    run_gse_parser.add_argument("--output-root", default=str(ATAC_OUTPUT_DIR))
     run_gse_parser.add_argument("--force", action="store_true")
     run_gse_parser.add_argument("--dry-run", action="store_true")
 
@@ -954,6 +1002,199 @@ def build_parser() -> argparse.ArgumentParser:
     co_run_atac_gse_parser.add_argument("--force", action="store_true")
     co_run_atac_gse_parser.add_argument("--dry-run", action="store_true")
 
+    longevity_discover_parser = subparsers.add_parser(
+        "longevity-discover", help="List independent longevity RNA atlas and ATAC samples"
+    )
+    longevity_discover_parser.add_argument("--sample-id", help="Restrict ATAC discovery to one sample")
+
+    longevity_status_parser = subparsers.add_parser(
+        "longevity-status", help="Show independent longevity ATAC run status"
+    )
+    longevity_status_parser.add_argument("--sample-id", help="Restrict ATAC status to one sample")
+    longevity_status_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "longevity")
+    )
+
+    longevity_run_atac_sample_parser = subparsers.add_parser(
+        "longevity-run-atac-sample", help="Run one independent longevity ATAC sample"
+    )
+    longevity_run_atac_sample_parser.add_argument("--sample-id", required=True)
+    longevity_run_atac_sample_parser.add_argument("--rscript", default="Rscript")
+    longevity_run_atac_sample_parser.add_argument("--output-profile", default="full")
+    longevity_run_atac_sample_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "longevity")
+    )
+    longevity_run_atac_sample_parser.add_argument("--nmads", type=float, default=4)
+    longevity_run_atac_sample_parser.add_argument("--min-inferred-fragments", type=float, default=None)
+    longevity_run_atac_sample_parser.add_argument("--max-inferred-barcodes", type=int, default=None)
+    longevity_run_atac_sample_parser.add_argument("--umap-min-dist", type=float, default=None)
+    longevity_run_atac_sample_parser.add_argument(
+        "--barcode-output-root",
+        default=str(DATA_ROOT / "reference" / "longevity" / "atac_barcodes"),
+    )
+    longevity_run_atac_sample_parser.add_argument("--barcode-min-fragments", type=int, default=200)
+    longevity_run_atac_sample_parser.add_argument("--barcode-max-barcodes", type=int, default=20000)
+    longevity_run_atac_sample_parser.add_argument("--barcode-min-tss", type=float, default=2.5)
+    longevity_run_atac_sample_parser.add_argument(
+        "--barcode-rank-by", choices=["fragments", "tss_then_fragments"], default="fragments"
+    )
+    longevity_run_atac_sample_parser.add_argument("--barcode-overrides", type=Path, default=None)
+    longevity_run_atac_sample_parser.add_argument("--force", action="store_true")
+    longevity_run_atac_sample_parser.add_argument("--dry-run", action="store_true")
+
+    longevity_run_atac_all_parser = subparsers.add_parser(
+        "longevity-run-atac-all", help="Run all independent longevity ATAC samples"
+    )
+    longevity_run_atac_all_parser.add_argument("--rscript", default="Rscript")
+    longevity_run_atac_all_parser.add_argument("--output-profile", default="full")
+    longevity_run_atac_all_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "longevity")
+    )
+    longevity_run_atac_all_parser.add_argument("--nmads", type=float, default=4)
+    longevity_run_atac_all_parser.add_argument("--min-inferred-fragments", type=float, default=None)
+    longevity_run_atac_all_parser.add_argument("--max-inferred-barcodes", type=int, default=None)
+    longevity_run_atac_all_parser.add_argument("--umap-min-dist", type=float, default=None)
+    longevity_run_atac_all_parser.add_argument(
+        "--barcode-output-root",
+        default=str(DATA_ROOT / "reference" / "longevity" / "atac_barcodes"),
+    )
+    longevity_run_atac_all_parser.add_argument("--barcode-min-fragments", type=int, default=200)
+    longevity_run_atac_all_parser.add_argument("--barcode-max-barcodes", type=int, default=20000)
+    longevity_run_atac_all_parser.add_argument("--barcode-min-tss", type=float, default=2.5)
+    longevity_run_atac_all_parser.add_argument(
+        "--barcode-rank-by", choices=["fragments", "tss_then_fragments"], default="fragments"
+    )
+    longevity_run_atac_all_parser.add_argument("--barcode-overrides", type=Path, default=None)
+    longevity_run_atac_all_parser.add_argument("--force", action="store_true")
+    longevity_run_atac_all_parser.add_argument("--dry-run", action="store_true")
+
+    longevity_ingest_rna_parser = subparsers.add_parser(
+        "longevity-ingest-rna",
+        help="Write longevity RNA h5ad with 5-class final_celltype and comparison table",
+    )
+    longevity_ingest_rna_parser.add_argument("--sample-id", default=None)
+    longevity_ingest_rna_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "longevity")
+    )
+    longevity_ingest_rna_parser.add_argument("--dry-run", action="store_true")
+
+    longevity_preprocess_barcodes_parser = subparsers.add_parser(
+        "longevity-preprocess-atac-barcodes",
+        help="Generate ArchR-based filtered barcode files for longevity ATAC samples",
+    )
+    longevity_preprocess_barcodes_parser.add_argument("--sample-id", default=None)
+    longevity_preprocess_barcodes_parser.add_argument("--rscript", default="Rscript")
+    longevity_preprocess_barcodes_parser.add_argument(
+        "--output-root",
+        default=str(DATA_ROOT / "reference" / "longevity" / "atac_barcodes"),
+    )
+    longevity_preprocess_barcodes_parser.add_argument("--min-fragments", type=int, default=200)
+    longevity_preprocess_barcodes_parser.add_argument("--max-barcodes", type=int, default=20000)
+    longevity_preprocess_barcodes_parser.add_argument("--min-tss", type=float, default=2.5)
+    longevity_preprocess_barcodes_parser.add_argument(
+        "--rank-by", choices=["fragments", "tss_then_fragments"], default="fragments"
+    )
+    longevity_preprocess_barcodes_parser.add_argument("--overrides", type=Path, default=None)
+    longevity_preprocess_barcodes_parser.add_argument("--force", action="store_true")
+    longevity_preprocess_barcodes_parser.add_argument("--dry-run", action="store_true")
+    longevity_preprocess_barcodes_parser.add_argument("--keep-going", action="store_true")
+
+    longevity_barcode_status_parser = subparsers.add_parser(
+        "longevity-atac-barcode-status",
+        help="Show longevity ATAC preprocessed barcode availability",
+    )
+    longevity_barcode_status_parser.add_argument("--sample-id", default=None)
+    longevity_barcode_status_parser.add_argument(
+        "--output-root",
+        default=str(DATA_ROOT / "reference" / "longevity" / "atac_barcodes"),
+    )
+    longevity_barcode_status_parser.add_argument(
+        "--format", choices=["table", "csv", "json"], default="table"
+    )
+
+    longevity_param_summary_parser = subparsers.add_parser(
+        "longevity-summarize-atac-param-contrast",
+        help="Summarize longevity ATAC parameter contrast outputs and select best candidate per sample",
+    )
+    longevity_param_summary_parser.add_argument(
+        "--contrast-root", default=str(ROOT / "output" / "longevity_param_contrast")
+    )
+    longevity_param_summary_parser.add_argument("--min-pass-qc", type=int, default=5000)
+    longevity_param_summary_parser.add_argument("--min-frip", type=float, default=0.6)
+    longevity_param_summary_parser.add_argument(
+        "--format", choices=["table", "csv", "json"], default="table"
+    )
+    longevity_param_summary_parser.add_argument("--write", action="store_true")
+
+    longevity_param_run_parser = subparsers.add_parser(
+        "longevity-run-atac-param-contrast",
+        help="Run longevity ATAC samples across predefined barcode parameter candidates",
+    )
+    longevity_param_run_parser.add_argument("--sample-id", action="append", default=[])
+    longevity_param_run_parser.add_argument("--candidate", action="append", default=[])
+    longevity_param_run_parser.add_argument("--rscript", default="Rscript")
+    longevity_param_run_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "longevity_param_contrast")
+    )
+    longevity_param_run_parser.add_argument(
+        "--barcode-output-root",
+        default=str(DATA_ROOT / "reference" / "longevity" / "atac_barcodes_param_contrast"),
+    )
+    longevity_param_run_parser.add_argument("--nmads", type=float, default=4)
+    longevity_param_run_parser.add_argument("--umap-min-dist", type=float, default=None)
+    longevity_param_run_parser.add_argument("--skip-complete", action="store_true")
+    longevity_param_run_parser.add_argument("--keep-going", action="store_true")
+    longevity_param_run_parser.add_argument("--dry-run", action="store_true")
+
+    longevity_custom_param_run_parser = subparsers.add_parser(
+        "longevity-run-atac-custom-param-contrast",
+        help="Run one longevity ATAC sample with one custom barcode parameter candidate",
+    )
+    longevity_custom_param_run_parser.add_argument("--sample-id", required=True)
+    longevity_custom_param_run_parser.add_argument("--candidate-name", default=None)
+    longevity_custom_param_run_parser.add_argument("--min-fragments", type=int, required=True)
+    longevity_custom_param_run_parser.add_argument("--max-barcodes", type=int, required=True)
+    longevity_custom_param_run_parser.add_argument("--min-tss", type=float, required=True)
+    longevity_custom_param_run_parser.add_argument(
+        "--rank-by", choices=["fragments", "tss_then_fragments"], default="fragments"
+    )
+    longevity_custom_param_run_parser.add_argument("--rscript", default="Rscript")
+    longevity_custom_param_run_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "longevity_param_contrast")
+    )
+    longevity_custom_param_run_parser.add_argument(
+        "--barcode-output-root",
+        default=str(DATA_ROOT / "reference" / "longevity" / "atac_barcodes_param_contrast"),
+    )
+    longevity_custom_param_run_parser.add_argument("--nmads", type=float, default=4)
+    longevity_custom_param_run_parser.add_argument("--umap-min-dist", type=float, default=None)
+    longevity_custom_param_run_parser.add_argument("--skip-complete", action="store_true")
+    longevity_custom_param_run_parser.add_argument("--dry-run", action="store_true")
+
+    longevity_param_publish_parser = subparsers.add_parser(
+        "longevity-publish-atac-param-contrast",
+        help="Copy selected longevity ATAC parameter contrast outputs into the formal longevity output tree",
+    )
+    longevity_param_publish_parser.add_argument(
+        "--selection-csv",
+        default=str(ROOT / "output" / "longevity_param_contrast" / "param_contrast_selected_samples.csv"),
+    )
+    longevity_param_publish_parser.add_argument(
+        "--output-root", default=str(ROOT / "output" / "longevity")
+    )
+    longevity_param_publish_parser.add_argument("--force", action="store_true")
+    longevity_param_publish_parser.add_argument("--dry-run", action="store_true")
+
+    backfill_rna_final_parser = subparsers.add_parser(
+        "backfill-rna-final-celltype",
+        help="Backfill RNA outputs to the 5-class final_celltype vocabulary",
+    )
+    backfill_rna_final_parser.add_argument(
+        "--root", default=str(ROOT / "output" / "co" / "rna" / "GSE224198")
+    )
+    backfill_rna_final_parser.add_argument("--dry-run", action="store_true")
+    backfill_rna_final_parser.add_argument("--fail-on-skip", action="store_true")
+
     tea_seq_parser = subparsers.add_parser(
         "tea-seq-audit",
         help="Organize TEA-seq accepted outputs and write a dataset-level QC audit",
@@ -1037,6 +1278,42 @@ def main() -> int:
 
     if args.command == "co-run-atac-gse":
         return co_cli.cmd_run_atac_gse(args)
+
+    if args.command == "longevity-discover":
+        return longevity_cli.cmd_discover(args)
+
+    if args.command == "longevity-status":
+        return longevity_cli.cmd_status(args)
+
+    if args.command == "longevity-run-atac-sample":
+        return longevity_cli.cmd_run_atac_sample(args)
+
+    if args.command == "longevity-run-atac-all":
+        return longevity_cli.cmd_run_atac_all(args)
+
+    if args.command == "longevity-ingest-rna":
+        return longevity_cli.cmd_ingest_rna(args)
+
+    if args.command == "longevity-preprocess-atac-barcodes":
+        return longevity_cli.cmd_preprocess_atac_barcodes(args)
+
+    if args.command == "longevity-atac-barcode-status":
+        return longevity_cli.cmd_atac_barcode_status(args)
+
+    if args.command == "longevity-summarize-atac-param-contrast":
+        return longevity_cli.cmd_summarize_atac_param_contrast(args)
+
+    if args.command == "longevity-run-atac-param-contrast":
+        return longevity_cli.cmd_run_atac_param_contrast(args)
+
+    if args.command == "longevity-run-atac-custom-param-contrast":
+        return longevity_cli.cmd_run_atac_custom_param_contrast(args)
+
+    if args.command == "longevity-publish-atac-param-contrast":
+        return longevity_cli.cmd_publish_atac_param_contrast(args)
+
+    if args.command == "backfill-rna-final-celltype":
+        return backfill_final_celltype.cmd_backfill_rna_final_celltype(args)
 
     if args.command == "tea-seq-audit":
         return run_tea_seq_audit(

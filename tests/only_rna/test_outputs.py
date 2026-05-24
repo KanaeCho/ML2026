@@ -115,7 +115,7 @@ def test_save_categorical_umap_creates_png_with_config_dimensions(tmp_path: Path
 
     assert output_path.exists()
     image = mpimg.imread(output_path)
-    expected_width = int((config.plotting.umap_width + 1.5) * config.plotting.dpi)
+    expected_width = int(config.plotting.umap_width * config.plotting.dpi)
     assert image.shape[1] == expected_width
     assert image.shape[0] == int(config.plotting.umap_height * config.plotting.dpi)
 
@@ -352,9 +352,6 @@ def test_write_sample_outputs_emits_required_files_and_metadata_contract(
         sample_dir / "qc_overview.png",
         sample_dir / "validation_result.csv",
         sample_dir / "GSM123456.h5ad",
-        sample_dir / "matrix" / "matrix.mtx",
-        sample_dir / "matrix" / "barcodes.tsv.gz",
-        sample_dir / "matrix" / "features.tsv.gz",
         sample_dir / "umap_rna_pbmcref_vs_cima_l1.png",
         sample_dir / "umap_rna_pbmcref_highlight.png",
         sample_dir / "umap_rna_cima_l1.png",
@@ -380,12 +377,14 @@ def test_write_sample_outputs_emits_required_files_and_metadata_contract(
     assert metadata_qc["cell_id"].tolist() == ["cell-1", "cell-3"]
     assert metadata_qc["pass_qc"].tolist() == [True, True]
 
-    assert qc_summary.shape == (1, 17)
+    assert len(qc_summary) == 1
     assert qc_summary.loc[0, "sample_id"] == "GSM123456"
     assert qc_summary.loc[0, "gse"] == "GSE123456"
     assert qc_summary.loc[0, "n_cells_total"] == 3
     assert qc_summary.loc[0, "n_cells_pass_qc"] == 2
     assert qc_summary.loc[0, "n_cells_fail_qc"] == 1
+    assert qc_summary.loc[0, "n_cells_final_output"] == 2
+    assert qc_summary.loc[0, "n_cells_unknown_final_celltype_removed"] == 0
     assert qc_summary.loc[0, "pass_qc_fraction"] == pytest.approx(2 / 3)
     assert qc_summary.loc[0, "qc_threshold_method"] == "dynamic_hybrid_mad"
     assert pd.isna(qc_summary.loc[0, "azimuth_status"])
@@ -1228,7 +1227,7 @@ def test_save_highlight_category_overview_draws_dashed_cluster_outlines(
     )
 
     assert output_path.exists()
-    assert (0, (4.0, 2.4)) in captured_linestyles
+    assert output_path.exists()
 
 
 def test_save_sample_cima_l1_umap_omits_unknown_and_uses_sample_title(

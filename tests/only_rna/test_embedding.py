@@ -16,10 +16,20 @@ from scripts.only_rna.models import (
 def _make_run_config(**embedding_overrides) -> RunConfig:
     return RunConfig(
         qc=QcThresholds(
-            min_counts=500,
-            min_genes=300,
-            max_pct_mt=20.0,
-            max_pct_ribo=60.0,
+            method="dynamic_hybrid_mad",
+            counts_lower_nmads=3.0,
+            genes_lower_nmads=3.0,
+            pct_mt_upper_nmads=3.0,
+            pct_ribo_upper_nmads=3.5,
+            min_cells_for_dynamic=50,
+            count_floor_min=500,
+            count_floor_max=1500,
+            gene_floor_min=300,
+            gene_floor_max=1200,
+            pct_mt_ceiling_min=5.0,
+            pct_mt_ceiling_max=20.0,
+            pct_ribo_ceiling_min=20.0,
+            pct_ribo_ceiling_max=60.0,
         ),
         plotting=PlottingConfig(
             umap_width=8.0,

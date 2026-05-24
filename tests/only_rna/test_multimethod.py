@@ -24,10 +24,20 @@ from scripts.only_rna.plotting import save_annotation_method_comparison_umap
 def _make_run_config() -> RunConfig:
     return RunConfig(
         qc=QcThresholds(
-            min_counts=500,
-            min_genes=300,
-            max_pct_mt=20.0,
-            max_pct_ribo=60.0,
+            method="dynamic_hybrid_mad",
+            counts_lower_nmads=3.0,
+            genes_lower_nmads=3.0,
+            pct_mt_upper_nmads=3.0,
+            pct_ribo_upper_nmads=3.5,
+            min_cells_for_dynamic=50,
+            count_floor_min=500,
+            count_floor_max=1500,
+            gene_floor_min=300,
+            gene_floor_max=1200,
+            pct_mt_ceiling_min=5.0,
+            pct_mt_ceiling_max=20.0,
+            pct_ribo_ceiling_min=20.0,
+            pct_ribo_ceiling_max=60.0,
         ),
         plotting=PlottingConfig(
             umap_width=4.0,
@@ -180,6 +190,7 @@ def test_annotate_with_all_versions_uses_shared_azimuth_result_and_records_statu
             labels=pd.Series(
                 ["CD4 T", "B"], index=["cell-1", "cell-3"], dtype="string"
             ),
+            labels_by_level={},
             status="ok",
             detail="pbmcref",
         )
@@ -215,6 +226,7 @@ def test_annotate_with_all_versions_keeps_na_azimuth_labels_and_records_error_st
         "scripts.only_rna.annotation.run_azimuth_annotation",
         lambda *_args, **_kwargs: AzimuthAnnotationResult(
             labels=None,
+            labels_by_level={},
             status="error",
             detail="Azimuth crashed",
         ),
@@ -287,9 +299,9 @@ def test_write_sample_outputs_does_not_emit_retired_multimethod_comparison_umap(
 def test_merge_cli_overrides_preserves_annotation_methods():
     base = _make_run_config()
 
-    merged = merge_cli_overrides(base, qc__min_genes=350)
+    merged = merge_cli_overrides(base, qc__gene_floor_min=350)
 
-    assert merged.qc.min_genes == 350
+    assert merged.qc.gene_floor_min == 350
     assert merged.annotation is not None
     assert merged.annotation.methods == [
         "cima",

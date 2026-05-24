@@ -38,8 +38,13 @@ def _normalize_adata(adata: ad.AnnData, sample: DiscoveredSample) -> ad.AnnData:
     normalized.var_names_make_unique()
     normalized.obs["gse"] = sample.gse
     normalized.obs["sample_id"] = sample.sample_id
+    normalized.obs["sample"] = sample.sample_id
+    normalized.obs["dataset"] = sample.gse
     normalized.obs["input_type"] = sample.input_type
     normalized.obs["individual_id"] = sample.individual_id or ""
+    normalized.obs["donor"] = sample.donor or sample.individual_id or ""
+    normalized.obs["age"] = sample.age or ""
+    normalized.obs["health"] = sample.health or ""
     return normalized
 
 

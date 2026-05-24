@@ -22,6 +22,9 @@ class DiscoveredSample:
     note: str
     source_name: str
     individual_id: str = ""
+    age: str = ""
+    health: str = ""
+    donor: str = ""
     matrix_path: Path | None = None
     barcodes_path: Path | None = None
     features_path: Path | None = None

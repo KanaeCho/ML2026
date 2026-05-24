@@ -13,6 +13,11 @@ from scipy import sparse
 from scipy.io import mmwrite
 
 from .models import PlottingConfig, QcThresholds, RunConfig
+from .final_celltype import (
+    RNA_FINAL_CELLTYPE_MAPPING_VERSION,
+    infer_rna_final_celltype_series,
+    known_rna_final_celltype_mask,
+)
 from .plotting import (
     save_azimuth_candidate_overview,
     save_categorical_umap,
@@ -82,12 +87,85 @@ def _sanitize_dataframe_for_h5ad(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _prepare_h5ad_adata(adata: ad.AnnData) -> ad.AnnData:
-    out = adata.copy()
+    obs = cast(pd.DataFrame, adata.obs)
+    pass_qc = _bool_pass_qc(obs)
+    out = adata[pass_qc.to_numpy()].copy()
+    obs_out = cast(pd.DataFrame, out.obs).copy()
+    obs_out = _add_rna_final_output_columns(obs_out, out.obs_names.astype(str).tolist())
+    known_mask = _known_final_celltype_mask(obs_out)
+    out = out[known_mask.to_numpy()].copy()
+    obs_out = obs_out.loc[known_mask.to_numpy()].copy()
+
+    keep_obs = [
+        "cell_barcode",
+        "sample",
+        "dataset",
+        "age",
+        "health",
+        "donor",
+        "final_celltype",
+        "final_celltype_mapping",
+        "azimuth_cima_l1_raw",
+        "pbmcref_celltype",
+        "umap_1",
+        "umap_2",
+        "azimuth_cima_l1",
+        "azimuth_cell_type_l2_raw",
+        "azimuth_cell_type",
+    ]
+    out.obs = obs_out[[column for column in keep_obs if column in obs_out.columns]].copy()
     sanitized_obs = _sanitize_dataframe_for_h5ad(cast(pd.DataFrame, out.obs))
     sanitized_var = _sanitize_dataframe_for_h5ad(cast(pd.DataFrame, out.var))
     out.obs = sanitized_obs
     out.var = sanitized_var
     return out
+
+
+def _add_rna_final_output_columns(frame: pd.DataFrame, cell_ids: Sequence[str]) -> pd.DataFrame:
+    out = frame.copy()
+    out["cell_barcode"] = list(cell_ids)
+    out["sample"] = out["sample_id"].astype(str) if "sample_id" in out.columns else ""
+    out["dataset"] = out["gse"].astype(str) if "gse" in out.columns else ""
+    if "donor" not in out.columns:
+        out["donor"] = out["individual_id"].astype(str) if "individual_id" in out.columns else ""
+    if "age" not in out.columns:
+        out["age"] = ""
+    if "health" not in out.columns:
+        out["health"] = ""
+    if "azimuth_cima_l1_raw" in out.columns:
+        raw_l1 = out["azimuth_cima_l1_raw"]
+    elif "azimuth_cima_l1" in out.columns:
+        raw_l1 = out["azimuth_cima_l1"]
+        out["azimuth_cima_l1_raw"] = raw_l1.astype(str)
+    elif "cima_l1" in out.columns:
+        raw_l1 = out["cima_l1"]
+        out["azimuth_cima_l1_raw"] = raw_l1.astype(str)
+    else:
+        raw_l1 = pd.Series("", index=out.index, dtype=object)
+        out["azimuth_cima_l1_raw"] = ""
+    raw_l2 = (
+        out["azimuth_cell_type_l2_raw"]
+        if "azimuth_cell_type_l2_raw" in out.columns
+        else out["azimuth_cell_type"]
+        if "azimuth_cell_type" in out.columns
+        else pd.Series(pd.NA, index=out.index, dtype=object)
+    )
+    out["final_celltype"] = infer_rna_final_celltype_series(raw_l1, raw_l2).astype(str)
+    out["azimuth_cima_l1"] = out["final_celltype"].astype(str)
+    out["final_celltype_mapping"] = RNA_FINAL_CELLTYPE_MAPPING_VERSION
+    if "azimuth_cell_type_l2_raw" in out.columns:
+        out["pbmcref_celltype"] = out["azimuth_cell_type_l2_raw"].astype(str)
+    elif "azimuth_cell_type" in out.columns:
+        out["pbmcref_celltype"] = out["azimuth_cell_type"].astype(str)
+    else:
+        out["pbmcref_celltype"] = ""
+    return out
+
+
+def _known_final_celltype_mask(frame: pd.DataFrame) -> pd.Series:
+    if "final_celltype" not in frame.columns:
+        return pd.Series(False, index=frame.index)
+    return known_rna_final_celltype_mask(frame["final_celltype"])
 
 
 def _bool_pass_qc(obs: pd.DataFrame) -> pd.Series:
@@ -109,6 +187,8 @@ def _write_qc_summary(
     sample_id: str,
     n_cells_total: int,
     n_cells_pass_qc: int,
+    n_cells_final_output: int,
+    n_cells_unknown_final_celltype_removed: int,
     metadata_qc: pd.DataFrame,
     annotation_method_status: dict[str, dict[str, str]],
     qc_thresholds: dict[str, Any] | None,
@@ -146,6 +226,8 @@ def _write_qc_summary(
                 "n_cells_total": n_cells_total,
                 "n_cells_pass_qc": n_cells_pass_qc,
                 "n_cells_fail_qc": n_cells_total - n_cells_pass_qc,
+                "n_cells_final_output": n_cells_final_output,
+                "n_cells_unknown_final_celltype_removed": n_cells_unknown_final_celltype_removed,
                 "pass_qc_fraction": (
                     float(n_cells_pass_qc) / float(n_cells_total)
                     if n_cells_total > 0
@@ -216,6 +298,8 @@ def _write_validation_result(
     expected_paths: dict[str, Path],
     n_cells_total: int,
     n_cells_pass_qc: int,
+    n_cells_final_output: int,
+    n_cells_unknown_final_celltype_removed: int,
     annotation_method_status: dict[str, dict[str, str]],
 ) -> None:
     rows = [
@@ -233,6 +317,14 @@ def _write_validation_result(
             "check_name": "metadata_qc_pass_qc_only",
             "passed": True,
             "detail": f"n_cells_pass_qc={n_cells_pass_qc}",
+        },
+        {
+            "check_name": "metadata_qc_known_final_celltype_only",
+            "passed": True,
+            "detail": (
+                f"n_cells_final_output={n_cells_final_output};"
+                f"unknown_final_celltype_removed={n_cells_unknown_final_celltype_removed}"
+            ),
         },
     ]
     rows.extend(
@@ -448,9 +540,19 @@ def write_sample_outputs(
         if artifact_path.exists():
             artifact_path.unlink()
 
-    metadata = _metadata_frame(adata)
+    metadata = _add_rna_final_output_columns(
+        _metadata_frame(adata),
+        adata.obs_names.astype(str).tolist(),
+    )
     pass_qc_mask = _bool_pass_qc(cast(pd.DataFrame, adata.obs))
-    metadata_qc = metadata.loc[pass_qc_mask.to_numpy()].reset_index(drop=True)
+    metadata_pass_qc = metadata.loc[pass_qc_mask.to_numpy()].reset_index(drop=True)
+    metadata_qc_final = _add_rna_final_output_columns(
+        metadata_pass_qc,
+        metadata_pass_qc["cell_id"].astype(str).tolist(),
+    )
+    known_final_mask = _known_final_celltype_mask(metadata_qc_final)
+    n_cells_unknown_final_celltype_removed = int((~known_final_mask).sum())
+    metadata_qc = metadata_qc_final.loc[known_final_mask.to_numpy()].reset_index(drop=True)
     annotation_method_status = dict(adata.uns.get("annotation_method_status", {}))
     qc_thresholds = dict(cast(dict[str, Any], adata.uns.get("qc_thresholds", {})))
 
@@ -471,6 +573,8 @@ def write_sample_outputs(
         sample_id=sample_id,
         n_cells_total=adata.n_obs,
         n_cells_pass_qc=int(pass_qc_mask.sum()),
+        n_cells_final_output=len(metadata_qc),
+        n_cells_unknown_final_celltype_removed=n_cells_unknown_final_celltype_removed,
         metadata_qc=metadata_qc,
         annotation_method_status=annotation_method_status,
         qc_thresholds=qc_thresholds,
@@ -479,7 +583,6 @@ def write_sample_outputs(
     _prepare_h5ad_adata(adata).write_h5ad(
         h5ad_path, convert_strings_to_categoricals=False
     )
-    _export_matrix_triplet(adata, matrix_dir)
     save_qc_overview(adata, qc_overview_path, config)
 
     expected_paths: dict[str, Path] = {
@@ -490,9 +593,6 @@ def write_sample_outputs(
         "qc_overview.png": qc_overview_path,
         "validation_result.csv": validation_result_path,
         f"{sample_id}.h5ad": h5ad_path,
-        "matrix/matrix.mtx": matrix_dir / "matrix.mtx",
-        "matrix/barcodes.tsv.gz": matrix_dir / "barcodes.tsv.gz",
-        "matrix/features.tsv.gz": matrix_dir / "features.tsv.gz",
     }
 
     dual_plot_path = output_dir / "umap_rna_pbmcref_vs_cima_l1.png"
@@ -534,6 +634,8 @@ def write_sample_outputs(
         expected_paths=expected_paths,
         n_cells_total=adata.n_obs,
         n_cells_pass_qc=int(pass_qc_mask.sum()),
+        n_cells_final_output=len(metadata_qc),
+        n_cells_unknown_final_celltype_removed=n_cells_unknown_final_celltype_removed,
         annotation_method_status=annotation_method_status,
     )
     return output_dir
