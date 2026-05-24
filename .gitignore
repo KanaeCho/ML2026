@@ -55,6 +55,10 @@ local_config*.yaml
 .opencode/
 opencode.json
 
+# Local study notes not intended for GitHub upload
+QC指标详解图示.md
+学习笔记_师姐scATAC质控流程.md
+
 # Notebooks
 *.ipynb
 .ipynb_checkpoints/
