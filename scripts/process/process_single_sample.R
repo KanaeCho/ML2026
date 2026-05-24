@@ -692,7 +692,7 @@ run_cima_reference_umap <- function(atac_obj, query_embeddings) {
   list(object = atac_obj, dims = dims_use)
 }
 
-run_single_sample_umap <- function(atac_obj) {
+run_single_sample_umap <- function(atac_obj, umap_min_dist = NA_real_) {
   DefaultAssay(atac_obj) <- "ATAC"
   atac_obj <- RunTFIDF(atac_obj)
   atac_obj <- FindTopFeatures(atac_obj, min.cutoff = "q0")
@@ -708,14 +708,18 @@ run_single_sample_umap <- function(atac_obj) {
   atac_obj <- FindNeighbors(atac_obj, reduction = "lsi", dims = dims_use, verbose = FALSE)
   atac_obj <- FindClusters(atac_obj, resolution = 0.5, verbose = FALSE)
 
-  atac_obj <- RunUMAP(
-    atac_obj,
+  umap_args <- list(
+    object = atac_obj,
     reduction = "lsi",
     dims = dims_use,
     reduction.name = "umap",
     reduction.key = "UMAP_",
     verbose = FALSE
   )
+  if (!is.na(umap_min_dist) && is.finite(umap_min_dist)) {
+    umap_args$min.dist <- umap_min_dist
+  }
+  atac_obj <- do.call(RunUMAP, umap_args)
 
   list(object = atac_obj, dims = dims_use)
 }
@@ -920,9 +924,13 @@ option_list <- list(
   make_option(c("--output-profile"), type = "character", default = "full", help = "Output profile: full or matrix-lite"),
   make_option(c("--output-root"), type = "character", default = file.path(project_root, "output"), help = "Output root directory"),
   make_option(c("--fragment-file"), type = "character", default = "", help = "Explicit fragment file path for non-standard sample layouts"),
+  make_option(c("--barcode-file"), type = "character", default = "", help = "Explicit filtered barcode file path for non-standard sample layouts"),
+  make_option(c("--filtered-metadata-file"), type = "character", default = "", help = "Explicit filtered metadata file path for non-standard sample layouts"),
+  make_option(c("--singlecell-file"), type = "character", default = "", help = "Explicit singlecell metadata file path for non-standard sample layouts"),
   make_option(c("--sample-label"), type = "character", default = "", help = "Display/project label when using an explicit fragment file"),
   make_option(c("--min-inferred-fragments"), type = "numeric", default = NA_real_, help = "Override minimum fragments for fragment-count barcode inference"),
-  make_option(c("--max-inferred-barcodes"), type = "integer", default = NA_integer_, help = "Override maximum barcodes for fragment-count barcode inference")
+  make_option(c("--max-inferred-barcodes"), type = "integer", default = NA_integer_, help = "Override maximum barcodes for fragment-count barcode inference"),
+  make_option(c("--umap-min-dist"), type = "numeric", default = NA_real_, help = "Optional RunUMAP min.dist override; NA keeps Seurat/uwot default")
 )
 
 opt_parser <- OptionParser(option_list = option_list)
@@ -1072,9 +1080,21 @@ fragment_file <- if (nzchar(opt$`fragment-file`)) {
 } else {
   find_single_file(raw_dir, opt$gsm, "fragments", required = TRUE)
 }
-barcode_file <- find_single_file(raw_dir, opt$gsm, "filtered_barcodes", required = FALSE)
-filtered_metadata_file <- find_single_file(raw_dir, opt$gsm, "filtered_metadata", required = FALSE, exts = c("csv", "tsv"))
-singlecell_file <- find_single_file(raw_dir, opt$gsm, "singlecell", required = FALSE, exts = c("csv", "tsv"))
+barcode_file <- if (nzchar(opt$`barcode-file`)) {
+  normalizePath(opt$`barcode-file`, winslash = "/", mustWork = TRUE)
+} else {
+  find_single_file(raw_dir, opt$gsm, "filtered_barcodes", required = FALSE)
+}
+filtered_metadata_file <- if (nzchar(opt$`filtered-metadata-file`)) {
+  normalizePath(opt$`filtered-metadata-file`, winslash = "/", mustWork = TRUE)
+} else {
+  find_single_file(raw_dir, opt$gsm, "filtered_metadata", required = FALSE, exts = c("csv", "tsv"))
+}
+singlecell_file <- if (nzchar(opt$`singlecell-file`)) {
+  normalizePath(opt$`singlecell-file`, winslash = "/", mustWork = TRUE)
+} else {
+  find_single_file(raw_dir, opt$gsm, "singlecell", required = FALSE, exts = c("csv", "tsv"))
+}
 sample_label <- if (nzchar(opt$`sample-label`)) opt$`sample-label` else opt$gsm
 
 cat(rep("=", 80), "\n", sep = "")
@@ -1391,7 +1411,7 @@ cima_umap_basis <- ""
 if (length(qc_cells) >= 3) {
   atac_qc_obj <- subset(atac_obj, cells = qc_cells)
   umap_result <- tryCatch(
-    run_single_sample_umap(atac_qc_obj),
+    run_single_sample_umap(atac_qc_obj, umap_min_dist = opt$`umap-min-dist`),
     error = function(e) {
       message("UMAP failed for ", opt$gsm, ": ", conditionMessage(e))
       NULL

@@ -187,7 +187,11 @@ def _override_path() -> Path:
 
 
 def _load_barcode_overrides(path: Path | None = None) -> dict[str, dict[str, str]]:
-    path = path or _override_path()
+    if path is None:
+        try:
+            path = _override_path()
+        except FileNotFoundError:
+            return {}
     if not path.exists():
         return {}
     frame = pd.read_csv(path, dtype=str, keep_default_na=False).fillna("")
@@ -752,7 +756,8 @@ def _preprocess_atac_barcodes_sample(sample: LongevityAtacSample, args) -> int:
 
 
 def _ensure_atac_barcodes(sample: LongevityAtacSample, args) -> tuple[int, Path | None]:
-    barcode_root = Path(getattr(args, "barcode_output_root", _barcode_root()))
+    barcode_output_root = getattr(args, "barcode_output_root", None)
+    barcode_root = Path(barcode_output_root) if barcode_output_root is not None else _barcode_root()
     thresholds = _run_barcode_thresholds_for_sample(sample.sample_id, args)
     status = _barcode_status_row(sample, barcode_root)
     if _barcode_status_matches_thresholds(status, thresholds):
