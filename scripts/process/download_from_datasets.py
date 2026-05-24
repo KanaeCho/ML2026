@@ -21,6 +21,7 @@ from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 DATASETS_XLSX = ROOT / "data" / "reference" / "datasets.xlsx"
+ATAC_XLSX = ROOT / "data" / "reference" / "atac.xlsx"
 RAW_DIR = ROOT / "data" / "raw"
 ASSAY_COL = "测序数据(scATAC/scRNA)"
 FORMAT_COL = "数据格式"
@@ -327,6 +328,36 @@ def load_rows_from_manifest_csv(
             assay=assay_value,
             data_format=format_value,
             raw=raw,
+        )
+        if gse and item.gse != gse:
+            continue
+        if gsm and item.gsm != gsm:
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def load_atac_rows(
+    xlsx_path: Path,
+    gse: str = "",
+    gsm: str = "",
+    sheet_name: str | None = None,
+) -> list[DatasetRow]:
+    rows = parse_xlsx_rows(xlsx_path, visible_rows_only=False, sheet_name=sheet_name)
+    filtered: list[DatasetRow] = []
+    for row in rows:
+        gsm_value = normalize_text(row.get("sample", ""))
+        gse_value = normalize_text(row.get("dataset", ""))
+        if not re.fullmatch(r"GSM\d+", gsm_value):
+            continue
+        if not re.fullmatch(r"GSE\d+", gse_value):
+            continue
+        item = DatasetRow(
+            gsm=gsm_value,
+            gse=gse_value,
+            assay="scATAC",
+            data_format="fragment",
+            raw=row,
         )
         if gse and item.gse != gse:
             continue
@@ -780,9 +811,15 @@ def print_summary(summary: SummaryStats) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Filter datasets.xlsx and download GEO supplementary sample files with aria2c"
+        description="Filter project sample workbooks and download GEO supplementary sample files with aria2c"
     )
     parser.add_argument("--xlsx-path", default=str(DATASETS_XLSX))
+    parser.add_argument(
+        "--manifest-kind",
+        choices=["datasets", "atac"],
+        default="datasets",
+        help="Workbook schema to use when --manifest-csv is not provided.",
+    )
     parser.add_argument("--manifest-csv", default="")
     parser.add_argument("--sheet-name", default="")
     parser.add_argument("--assay", default="")
@@ -815,7 +852,7 @@ def main() -> int:
             raise FileNotFoundError(f"manifest csv not found: {manifest_csv}")
     else:
         if not xlsx_path.exists():
-            raise FileNotFoundError(f"datasets workbook not found: {xlsx_path}")
+            raise FileNotFoundError(f"sample workbook not found: {xlsx_path}")
 
     file_kinds = {
         token.strip().lower() for token in args.file_kinds.split(",") if token.strip()
@@ -833,24 +870,35 @@ def main() -> int:
         )
         print(f"Manifest CSV: {manifest_csv}")
     else:
-        rows = load_filtered_rows(
-            xlsx_path,
-            assay=args.assay,
-            data_format=args.data_format,
-            gse=args.gse,
-            gsm=args.gsm,
-            visible_rows_only=not args.include_hidden_rows,
-            sheet_name=args.sheet_name or None,
-        )
-        print(f"Workbook: {xlsx_path}")
-        print(
-            "Workbook row selection: "
-            + (
-                "all rows (including hidden)"
-                if args.include_hidden_rows
-                else "visible rows only"
+        if args.manifest_kind == "atac":
+            rows = load_atac_rows(
+                xlsx_path,
+                gse=args.gse,
+                gsm=args.gsm,
+                sheet_name=args.sheet_name or None,
             )
-        )
+            print(f"ATAC workbook: {xlsx_path}")
+        else:
+            rows = load_filtered_rows(
+                xlsx_path,
+                assay=args.assay,
+                data_format=args.data_format,
+                gse=args.gse,
+                gsm=args.gsm,
+                visible_rows_only=not args.include_hidden_rows,
+                sheet_name=args.sheet_name or None,
+            )
+            print(f"Workbook: {xlsx_path}")
+            print(
+                "Workbook row selection: "
+                + (
+                    "all rows (including hidden)"
+                    if args.include_hidden_rows
+                    else "visible rows only"
+                )
+            )
+        if args.manifest_kind == "atac":
+            print("ATAC workbook row selection: all rows")
         if args.sheet_name:
             print(f"Workbook sheet: {args.sheet_name}")
     assay_label = repr(args.assay) if args.assay else "any"
