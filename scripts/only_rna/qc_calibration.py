@@ -49,13 +49,7 @@ def _discover_supported_sample(gse: str, sample_id: str) -> DiscoveredSample:
 
 def _profile_configs():
     mainline = load_default_config(DEFAULT_CONFIG_PATH)
-    baseline = merge_cli_overrides(
-        mainline,
-        qc__counts_lower_nmads=3.0,
-        qc__genes_lower_nmads=3.0,
-        qc__pct_mt_upper_nmads=3.0,
-        qc__pct_ribo_upper_nmads=3.5,
-    )
+    baseline = mainline
     stricter_v1 = merge_cli_overrides(
         mainline,
         qc__counts_lower_nmads=2.5,

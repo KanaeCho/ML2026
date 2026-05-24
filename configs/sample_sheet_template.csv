@@ -1,0 +1,6 @@
+dataset,sample_id,modality,assay,input_type,raw_path,matrix_path,barcodes_path,features_path,h5_path,fragment_path,barcode_path,metadata_path,age,health,donor,individual_id,co_dataset,is_co_sample,include,notes
+GSE000000,GSM0000001,RNA,scRNA,triplet,/path/to/raw/GSE000000,/path/to/matrix.mtx.gz,/path/to/barcodes.tsv.gz,/path/to/features.tsv.gz,,,,,unknown,unknown,donor_1,donor_1,,false,true,示例 RNA triplet 样本
+GSE000001,GSM0000002,ATAC,scATAC,fragments,/path/to/raw/GSE000001,,,,,/path/to/fragments.tsv.gz,/path/to/filtered_barcodes.tsv.gz,,unknown,unknown,donor_2,donor_2,,false,true,示例 ATAC fragment 样本
+7555405,donorA_Day0,RNA,coRNA,triplet,/path/to/raw/7555405/donorA_Day0/RNA,/path/to/matrix.mtx.gz,/path/to/barcodes.tsv.gz,/path/to/features.tsv.gz,,,,,unknown,healthy,donorA,donorA,7555405,true,true,示例共测 RNA 样本
+7555405,donorA_Day0,ATAC,coATAC,fragments,/path/to/raw/7555405/donorA_Day0/ATAC,,,,,/path/to/fragments.tsv.gz,/path/to/filtered_barcodes.tsv.gz,,unknown,healthy,donorA,donorA,7555405,true,true,示例共测 ATAC 样本
+longevity,W000000000000000,ATAC,longevityATAC,fragments,/path/to/raw/longevity/atac,,,,,/path/to/W000000000000000_fragments.tsv.gz,/path/to/filtered_barcodes.tsv.gz,,unknown,unknown,W000000000000000,W000000000000000,,false,true,示例 longevity ATAC 样本

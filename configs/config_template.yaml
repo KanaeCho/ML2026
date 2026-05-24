@@ -1,0 +1,144 @@
+# ML2026 风格 RNA/ATAC 多样本项目的可复用配置模板。
+# 使用时请复制成本地配置文件，并替换下面的占位符路径。
+# 不要把真实本地绝对路径、隐私 metadata 或密钥提交到 Git。
+
+project:
+  name: "rna_atac_project"
+  description: "可复用 RNA/ATAC 多样本分析项目"
+  owner: ""
+
+paths:
+  # 可复用配置中优先使用项目相对路径或环境变量。
+  # 本机专用路径应写在不提交 Git 的 local config 中。
+  data_root: "/path/to/data_root"
+  raw_root: "/path/to/data_root/raw"
+  reference_root: "/path/to/data_root/reference"
+  output_root: "/path/to/output_root"
+
+manifests:
+  rna_datasets_xlsx: "/path/to/data_root/reference/datasets.xlsx"
+  atac_workbook_xlsx: "/path/to/data_root/reference/atac.xlsx"
+  co_workbook_xlsx: "/path/to/data_root/reference/co.xlsx"
+  sample_sheet_csv: "configs/sample_sheet_template.csv"
+
+rna:
+  enabled: true
+  # 当前 RNA 主线已确认支持的输入类型。
+  input_types:
+    - triplet
+    - h5
+    - archive
+    - gse_shared_triplet
+  qc:
+    method: dynamic_hybrid_mad
+    counts_lower_nmads: 2.5
+    genes_lower_nmads: 2.5
+    pct_mt_upper_nmads: 2.5
+    pct_ribo_upper_nmads: 3.5
+    min_cells_for_dynamic: 50
+    count_floor_min: 100
+    count_floor_max: 1500
+    gene_floor_min: 100
+    gene_floor_max: 1200
+    pct_mt_ceiling_min: 5.0
+    pct_mt_ceiling_max: 40.0
+    pct_ribo_ceiling_min: 20.0
+    pct_ribo_ceiling_max: 80.0
+  embedding:
+    normalize_target_sum: 10000
+    hvg_flavor: seurat
+    n_top_genes: "auto"
+    n_pcs: 30
+    n_neighbors: "auto"
+    leiden_resolution: "auto"
+    umap_min_dist: 0.5
+    umap_spread: 1.0
+    random_state: 42
+  annotation:
+    primary_method: azimuth
+    azimuth_reference: pbmcref
+    final_celltype_vocab:
+      - CD4_T
+      - CD8_T
+      - B
+      - Myeloid
+      - NK
+  tuning:
+    mode: baseline_only
+    candidate_id: baseline__baseline__baseline
+
+atac:
+  enabled: true
+  peak_file: "/path/to/data_root/reference/peak.bed"
+  qc:
+    nmads: 4
+    doublet_method: scDblFinder
+    metrics:
+      - nCount_ATAC
+      - nFeature_ATAC
+      - TSS.enrichment
+      - FRiP
+      - nucleosome_signal
+      - blacklist_fraction
+      - fragments
+  barcode_selection:
+    # ATAC barcode 选择优先级：先用已过滤 barcode，再用 metadata，最后才从 fragments 推断。
+    priority:
+      - filtered_barcodes
+      - filtered_metadata
+      - singlecell
+      - fragment_count_inference
+    min_inferred_fragments: null
+    max_inferred_barcodes: null
+  annotation:
+    method: cima_atac_lsi_centroid
+    levels:
+      - l1
+      - l2
+      - l3
+      - l4
+  umap:
+    # null 表示保持脚本默认值。
+    min_dist: null
+
+co_assay:
+  enabled: true
+  manifest: "/path/to/data_root/reference/co.xlsx"
+  raw_layout: "raw/{dataset}/{sample}/{RNA,ATAC}"
+  # 当前项目未做 paired-cell matching 或 RNA+ATAC 联合 embedding。
+  paired_cell_matching: false
+
+longevity:
+  enabled: false
+  raw_layout: "raw/longevity/{rna,atac}"
+  atac_barcode_preprocessing:
+    min_fragments: 200
+    max_barcodes: 20000
+    min_tss: 2.5
+    rank_by: fragments
+
+integration:
+  enabled: true
+  products:
+    - only_atac
+    - only_rna
+    - co_atac
+    - co_rna
+  copy_mode: symlink
+  n_components: 30
+  max_umap_fit_cells: 100000
+  random_state: 42
+  rna:
+    method: harmony
+    batch_key: gse
+    min_cima_l1_score_for_only_rna: 0.5
+  atac:
+    method: bbknn
+    batch_key: sample_id
+    neighbors_within_batch: 1
+    trim: 60
+
+logging:
+  write_run_status_json: true
+  write_sample_logs: true
+  log_filename: logs/sample_qc.log

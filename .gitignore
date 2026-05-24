@@ -19,3 +19,42 @@ wangdao/
 dive-into-llms/
 data
 output
+
+# Large scientific data and generated analysis artifacts
+QualityControl/
+ArchRLogs/
+*.h5ad
+*.rds
+*.RData
+*.rda
+*.loom
+*.bam
+*.bai
+*.cram
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*_fragments.tsv.gz
+*.mtx
+*.mtx.gz
+*.csv.gz
+*.tsv.gz
+
+# Runtime logs and local configs
+*.log
+logs/
+local_config*.yaml
+.env
+.env.*
+.claude_resources.json
+.pytest_cache/
+
+# Local planning and tool state
+.planning/
+.opencode/
+opencode.json
+
+# Notebooks
+*.ipynb
+.ipynb_checkpoints/

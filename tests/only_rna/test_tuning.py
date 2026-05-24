@@ -12,6 +12,9 @@ import pytest
 from scripts.only_rna.discovery import DiscoveredSample
 
 
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "scripts/only_rna/default_config.yaml"
+
+
 def _make_overview_candidate_adata(offset: float = 0.0) -> ad.AnnData:
     obs_index = pd.Index(["cell-1", "cell-2"], dtype=object)
     var_index = pd.Index(["GeneA", "GeneB"], dtype=object)
@@ -63,9 +66,7 @@ def test_qc_calibration_profiles_match_stricter_mainline_defaults() -> None:
     from scripts.only_rna.config import load_run_config
 
     profiles = _profile_configs()
-    default_config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
-    )
+    default_config = load_run_config(DEFAULT_CONFIG_PATH)
 
     baseline = profiles["baseline"].qc
     stricter = profiles["stricter_v1"].qc
@@ -145,7 +146,7 @@ def test_run_tuning_executes_single_baseline_candidate_and_writes_selection_arti
     )
 
     config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
+        DEFAULT_CONFIG_PATH
     )
 
     seen_candidate_ids: list[str] = []
@@ -314,7 +315,7 @@ def test_save_azimuth_candidate_overview_uses_smaller_points_for_dense_panels(
     from scripts.only_rna.plotting import save_azimuth_candidate_overview
 
     config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
+        DEFAULT_CONFIG_PATH
     )
     candidates = [
         ("baseline__baseline__baseline", 0.81, _make_overview_candidate_adata()),
@@ -356,7 +357,7 @@ def test_save_azimuth_candidate_overview_uses_aligned_cima_l1_field(
     from scripts.only_rna.plotting import save_azimuth_candidate_overview
 
     config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
+        DEFAULT_CONFIG_PATH
     )
     candidates = [
         ("baseline__baseline__baseline", 0.81, _make_overview_candidate_adata()),
@@ -588,18 +589,37 @@ def test_write_tuning_selection_artifacts_uses_fine_pbmcref_labels_for_raw_overv
     )
 
 
-def test_save_azimuth_candidate_overview_adds_text_labels_to_pbmcref_panels(
+def test_save_dual_annotation_umap_adds_text_labels_to_pbmcref_panel(
     tmp_path: Path, monkeypatch
 ) -> None:
     from scripts.only_rna.config import load_run_config
-    from scripts.only_rna.plotting import save_azimuth_candidate_overview
+    from scripts.only_rna.plotting import save_dual_annotation_umap
 
     config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
+        DEFAULT_CONFIG_PATH
     )
-    candidates = [
-        ("baseline__baseline__baseline", 0.81, _make_overview_candidate_adata()),
-    ]
+    obs_index = pd.Index(["cell-1", "cell-2", "cell-3", "cell-4"], dtype=object)
+    adata = ad.AnnData(
+        X=np.ones((4, 2), dtype=float),
+        obs=pd.DataFrame(
+            {
+                "umap_1": [0.1, 0.2, 1.1, 1.2],
+                "umap_2": [1.0, 1.1, 2.0, 2.1],
+                "azimuth_cell_type_l2_raw": pd.Series(
+                    ["CD4 TCM", "CD4 TCM", "B naive", "B naive"],
+                    index=obs_index,
+                    dtype=object,
+                ),
+                "azimuth_cima_l1": pd.Series(
+                    ["CD4_T", "CD4_T", "B", "B"],
+                    index=obs_index,
+                    dtype=object,
+                ),
+            },
+            index=obs_index,
+        ),
+        var=pd.DataFrame(index=["GeneA", "GeneB"]),
+    )
 
     captured: list[str] = []
     original_text = matplotlib.axes.Axes.text
@@ -613,13 +633,11 @@ def test_save_azimuth_candidate_overview_adds_text_labels_to_pbmcref_panels(
     monkeypatch.setattr(matplotlib.axes.Axes, "text", capture_text)
 
     output_path = tmp_path / "pbmcref_overview.png"
-    save_azimuth_candidate_overview(
-        candidates=candidates,
+    save_dual_annotation_umap(
+        adata=adata,
         output_path=output_path,
         title="pbmcref overview",
         config=config,
-        color_key="azimuth_cell_type_l2_raw",
-        legend_title="pbmcref",
     )
 
     assert output_path.exists()
@@ -634,7 +652,7 @@ def test_save_azimuth_candidate_overview_skips_text_labels_for_pbmcref_panels(
     from scripts.only_rna.plotting import save_azimuth_candidate_overview
 
     config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
+        DEFAULT_CONFIG_PATH
     )
     candidates = [
         ("baseline__baseline__baseline", 0.81, _make_overview_candidate_adata()),
@@ -727,7 +745,7 @@ def test_enumerate_candidates_always_returns_single_baseline_candidate() -> None
     from scripts.only_rna.tuning_orchestrator import _enumerate_candidates
 
     config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
+        DEFAULT_CONFIG_PATH
     )
     config = merge_cli_overrides(config, tuning__max_candidates=2)
 
@@ -745,7 +763,7 @@ def test_run_tuning_raises_when_all_candidates_fail_but_keeps_candidate_audit(
     from scripts.only_rna.tuning_orchestrator import run_bounded_tuning
 
     config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
+        DEFAULT_CONFIG_PATH
     )
     config = merge_cli_overrides(config, tuning__max_candidates=2)
 
@@ -771,7 +789,7 @@ def test_run_tuning_prunes_stale_non_baseline_candidate_directories(
     from scripts.only_rna.tuning_orchestrator import CandidateEvaluation, run_bounded_tuning
 
     config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
+        DEFAULT_CONFIG_PATH
     )
     tuning_dir = tmp_path / "tuning"
     stale_dir = tuning_dir / "lenient__baseline__separated"
@@ -824,7 +842,7 @@ def test_evaluate_candidate_runs_pipeline_with_candidate_config_and_writes_candi
     from scripts.only_rna.tuning_orchestrator import evaluate_candidate
 
     base_config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
+        DEFAULT_CONFIG_PATH
     )
     sample = _make_sample(gse="GSE167363", sample_id="GSM5102900")
 
@@ -932,6 +950,10 @@ def test_evaluate_candidate_runs_pipeline_with_candidate_config_and_writes_candi
         "scripts.only_rna.tuning_orchestrator.write_sample_outputs",
         fake_write_sample_outputs,
     )
+    monkeypatch.setattr(
+        "scripts.only_rna.tuning_orchestrator.resolve_data_root",
+        lambda cwd=None: tmp_path,
+    )
 
     evaluation = evaluate_candidate(
         candidate_id="baseline__baseline__baseline",
@@ -973,7 +995,7 @@ def test_evaluate_candidate_uses_resolved_reference_dir(
     from scripts.only_rna.tuning_orchestrator import evaluate_candidate
 
     base_config = load_run_config(
-        Path("/mnt/f/ydd/ML2026/scripts/only_rna/default_config.yaml")
+        DEFAULT_CONFIG_PATH
     )
     sample = _make_sample(gse="GSE167363", sample_id="GSM5102900")
     expected_reference_dir = tmp_path / "external_data_root" / "reference"
