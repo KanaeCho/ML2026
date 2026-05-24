@@ -83,30 +83,21 @@ def normalize_health(value: Any) -> str:
 
 
 def load_dataset_covariates(reference_dir: Path) -> dict[tuple[str, str], dict[str, str]]:
-    path = reference_dir / "datasets.xlsx"
+    path = reference_dir / "atac.xlsx"
     df = pd.read_excel(path)
-    sample_col = "样本名(GSM*)"
-    gse_col = "数据集(GSE*)"
-    assay_col = "测序数据(scATAC/scRNA)"
     covariates: dict[tuple[str, str], dict[str, str]] = {}
-    atac = df[df[assay_col].astype(str).str.contains("scATAC", na=False)].copy()
-    for _, row in atac.iterrows():
-        gse = clean_value(row[gse_col])
-        sample_id = clean_value(row[sample_col])
+    for _, row in df.iterrows():
+        gse = clean_value(row["dataset"])
+        sample_id = clean_value(row["sample"])
         if not gse or not sample_id:
             continue
         covariates[(gse, sample_id)] = {
             "x_dataset": gse,
             "x_sample": sample_id,
-            "x_donor": "",
-            "x_age": clean_value(row.get("年龄", "")),
-            "x_health": normalize_health(row.get("健康状态", "")),
+            "x_donor": clean_value(row.get("donor", "")),
+            "x_age": clean_value(row.get("age", "")),
+            "x_health": normalize_health(row.get("health", "")),
         }
-    for (gse, sample_id), values in covariates.items():
-        if gse == "GSE190992":
-            values["x_donor"] = GSE190992_DONORS.get(sample_id, "")
-            values["x_age"] = "25-38"
-            values["x_health"] = "healthy"
     return covariates
 
 
@@ -128,17 +119,18 @@ def load_only_atac_covariates(reference_dir: Path) -> dict[tuple[str, str], dict
 
 
 def load_co_atac_covariates(data_root: Path) -> dict[tuple[str, str], dict[str, str]]:
-    path = data_root / "raw" / "7555405" / "sample_layout.tsv"
-    df = pd.read_csv(path, sep="\t")
+    path = data_root / "reference" / "co.xlsx"
+    df = pd.read_excel(path, dtype=str).fillna("")
     covariates: dict[tuple[str, str], dict[str, str]] = {}
     for _, row in df.iterrows():
-        sample_id = clean_value(row["sample_id"])
-        covariates[("7555405", sample_id)] = {
-            "x_dataset": "7555405",
+        dataset = clean_value(row["dataset"])
+        sample_id = clean_value(row["sample"])
+        covariates[(dataset, sample_id)] = {
+            "x_dataset": dataset,
             "x_sample": sample_id,
             "x_donor": clean_value(row["donor"]),
             "x_age": clean_value(row["age"]),
-            "x_health": "healthy",
+            "x_health": clean_value(row["health"]),
         }
     return covariates
 

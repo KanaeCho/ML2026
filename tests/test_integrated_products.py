@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 
+import anndata as ad
+import numpy as np
 import pandas as pd
+from scipy import sparse
 
 from scripts.process.organize_integrated_products import (
     default_integration_method,
@@ -27,6 +30,23 @@ def write_status(path: Path) -> None:
     path.write_text(json.dumps({"status": "success", "outputs_complete": True}), encoding="utf-8")
 
 
+def write_obs_h5ad(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
+    obs = pd.DataFrame(rows)
+    cell_col = "cell_id" if "cell_id" in obs.columns else "cell_barcode"
+    obs.index = pd.Index(obs[cell_col].astype(str), dtype=object)
+    obs.index.name = None
+    for column in obs.columns:
+        if pd.api.types.is_string_dtype(obs[column]) or pd.api.types.is_object_dtype(obs[column]):
+            obs[column] = obs[column].astype(object)
+    adata = ad.AnnData(
+        X=sparse.csr_matrix(np.ones((len(obs), 1), dtype=np.float32)),
+        obs=obs,
+        var=pd.DataFrame(index=pd.Index(["feature1"], dtype=object)),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    adata.write_h5ad(path)
+
+
 def make_rna_sample(root: Path, prefix: Path, sample_id: str) -> Path:
     sample_dir = root / prefix / sample_id
     rows = [
@@ -46,7 +66,7 @@ def make_rna_sample(root: Path, prefix: Path, sample_id: str) -> Path:
     write_status(sample_dir / "run_status.json")
     (sample_dir / "qc_overview.png").write_text("png")
     (sample_dir / "umap_rna_cima_l1.png").write_text("png")
-    (sample_dir / f"{sample_id}.h5ad").write_text("h5ad")
+    write_obs_h5ad(sample_dir / f"{sample_id}.h5ad", rows)
     (sample_dir / "matrix").mkdir(parents=True)
     (sample_dir / "matrix" / "matrix.mtx").write_text("matrix")
     (sample_dir / "matrix" / "barcodes.tsv.gz").write_text("barcodes")
@@ -76,6 +96,7 @@ def make_atac_sample(root: Path, prefix: Path, sample_id: str, legacy: bool = Fa
     write_csv(sample_dir / "validation_result.csv", rows)
     write_status(sample_dir / "run_status.json")
     (sample_dir / "umap_cima_cell_type_l1.png").write_text("png")
+    write_obs_h5ad(sample_dir / f"{sample_id}.h5ad", rows)
     (sample_dir / "matrix").mkdir(parents=True)
     (sample_dir / "matrix" / "matrix.mtx").write_text("matrix")
     (sample_dir / "matrix" / "barcodes.tsv").write_text("barcodes")
@@ -87,16 +108,19 @@ def make_atac_sample(root: Path, prefix: Path, sample_id: str, legacy: bool = Fa
 
 
 def test_discovers_four_product_sources(tmp_path: Path) -> None:
+    ref_dir = tmp_path / "reference"
+    ref_dir.mkdir(parents=True)
+    pd.DataFrame({"dataset": ["GSE2"], "sample": ["GSM2"]}).to_excel(ref_dir / "atac.xlsx", index=False)
     make_rna_sample(tmp_path, Path("rna/GSE1"), "GSM1")
     make_rna_sample(tmp_path, Path("rna/GSE206284"), "GSM6249236")
     make_rna_sample(tmp_path, Path("rna/GSE1/GSM1/tuning/baseline/GSE1"), "GSM1")
-    make_atac_sample(tmp_path, Path("GSE2"), "GSM2", legacy=True)
-    make_atac_sample(tmp_path, Path("GSE206284"), "GSM6254833", legacy=True)
+    make_atac_sample(tmp_path, Path("atac/GSE2"), "GSM2", legacy=True)
+    make_atac_sample(tmp_path, Path("atac/GSE206284"), "GSM6254833", legacy=True)
     make_atac_sample(tmp_path, Path("co/atac/7555405"), "donorA_Day0")
     make_rna_sample(tmp_path, Path("co/rna/7555405"), "donorA_Day0")
 
     assert [s.sample_id for s in discover_only_rna(tmp_path)] == ["GSM1"]
-    assert [s.sample_id for s in discover_only_atac(tmp_path)] == ["GSM2"]
+    assert [s.sample_id for s in discover_only_atac(tmp_path, ref_dir / "atac.xlsx")] == ["GSM2"]
     assert [s.sample_id for s in discover_co_atac(tmp_path)] == ["donorA_Day0"]
     assert [s.sample_id for s in discover_co_rna(tmp_path)] == ["donorA_Day0"]
 
@@ -128,6 +152,7 @@ def test_organize_product_writes_traceable_manifests(tmp_path: Path) -> None:
         leiden_resolution=1.0,
         rna_min_cima_l1_score=0.0,
         include_incomplete=False,
+        atac_workbook=None,
     )
 
     product_dir = tmp_path / "2.only_rna"
@@ -142,7 +167,10 @@ def test_organize_product_writes_traceable_manifests(tmp_path: Path) -> None:
 
 
 def test_organize_only_atac_uses_current_product_dir(tmp_path: Path) -> None:
-    make_atac_sample(tmp_path, Path("GSE2"), "GSM2", legacy=True)
+    ref_dir = tmp_path / "reference"
+    ref_dir.mkdir(parents=True)
+    pd.DataFrame({"dataset": ["GSE2"], "sample": ["GSM2"]}).to_excel(ref_dir / "atac.xlsx", index=False)
+    make_atac_sample(tmp_path, Path("atac/GSE2"), "GSM2", legacy=True)
 
     status = organize_product(
         output_root=tmp_path,
@@ -161,6 +189,7 @@ def test_organize_only_atac_uses_current_product_dir(tmp_path: Path) -> None:
         leiden_resolution=1.0,
         rna_min_cima_l1_score=0.0,
         include_incomplete=False,
+        atac_workbook=ref_dir / "atac.xlsx",
     )
 
     product_dir = tmp_path / "1.only_atac"

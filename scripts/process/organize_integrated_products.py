@@ -62,12 +62,16 @@ EXCLUDED_OUTPUT_NAMES = {
     "co",
     "reference",
     "rna",
+    "atac",
 }
 EXCLUDED_ONLY_ATAC_GSES = {
     # GSE206284 is the removed co2 dataset, not part of the accepted legacy
     # only_atac product. Including it creates isolated
     # sample-driven structures in product-level integration.
     "GSE206284",
+    # GSE282769 was downloaded and partially processed from atac.xlsx, but the
+    # CIMA ATAC labels did not resolve readable cell types for product review.
+    "GSE282769",
 }
 EXCLUDED_ONLY_RNA_GSES = {
     # GSE206284 is the removed co2 dataset and should not enter only_rna
@@ -84,23 +88,18 @@ COMMON_REQUIRED = [
 RNA_REQUIRED = [
     *COMMON_REQUIRED,
     "qc_overview.png",
-    "matrix/matrix.mtx",
-    "matrix/barcodes.tsv.gz",
-    "matrix/features.tsv.gz",
 ]
 ATAC_REQUIRED = [
     *COMMON_REQUIRED,
     "qc_overview.png",
     "umap_cima_cell_type_l1.png",
     "umap_cima_cell_type_l2.png",
-    "matrix/matrix.mtx",
 ]
 LEGACY_ATAC_REQUIRED = [
     "qc_summary.csv",
     "validation_result.csv",
     "run_status.json",
     "umap_cima_cell_type_l1.png",
-    "matrix/matrix.mtx",
 ]
 
 
@@ -216,9 +215,7 @@ def required_with_h5(sample: SampleProduct) -> list[str]:
     if sample.modality == "RNA":
         required.append(f"{sample.sample_id}.h5ad")
     if sample.modality == "ATAC":
-        rds_name = f"{sample.sample_id}_seurat_qc.rds"
-        if (sample.source_dir / rds_name).exists():
-            required.append(rds_name)
+        required.append(f"{sample.sample_id}.h5ad")
     return required
 
 
@@ -233,14 +230,6 @@ def missing_required_files(sample: SampleProduct) -> list[str]:
         for name in ["umap_rna_cima_l1.png", "umap_rna_pbmcref_vs_cima_l1.png", "umap_rna_pbmcref_highlight.png"]
     ):
         missing.append("rna_umap_png")
-    if sample.modality == "ATAC" and not any(
-        (sample.source_dir / "matrix" / name).exists() for name in ["barcodes.tsv.gz", "barcodes.tsv"]
-    ):
-        missing.append("matrix/barcodes.tsv[.gz]")
-    if sample.modality == "ATAC" and not any(
-        (sample.source_dir / "matrix" / name).exists() for name in ["features.tsv.gz", "features.tsv"]
-    ):
-        missing.append("matrix/features.tsv[.gz]")
     return missing
 
 
@@ -271,9 +260,21 @@ def discover_only_rna(output_root: Path) -> list[SampleProduct]:
     return samples
 
 
-def discover_only_atac(output_root: Path) -> list[SampleProduct]:
+def discover_only_atac(output_root: Path, atac_workbook: Path | None = None) -> list[SampleProduct]:
+    if atac_workbook is None:
+        atac_workbook = ROOT / "data" / "reference" / "atac.xlsx"
+    selected: set[tuple[str, str]] | None = None
+    if atac_workbook.exists():
+        rules = pd.read_excel(atac_workbook, dtype=str).fillna("")
+        if {"dataset", "sample"}.issubset(rules.columns):
+            rules["dataset"] = rules["dataset"].astype(str).str.strip()
+            rules["sample"] = rules["sample"].astype(str).str.strip()
+            selected = set(zip(rules["dataset"], rules["sample"], strict=False))
     samples = []
-    for gse_dir in sorted(path for path in output_root.iterdir() if path.is_dir()):
+    source_root = output_root / "atac"
+    if not source_root.exists():
+        return []
+    for gse_dir in sorted(path for path in source_root.iterdir() if path.is_dir()):
         if gse_dir.name in EXCLUDED_OUTPUT_NAMES or not gse_dir.name.startswith("GSE"):
             continue
         if gse_dir.name in EXCLUDED_ONLY_ATAC_GSES:
@@ -281,6 +282,8 @@ def discover_only_atac(output_root: Path) -> list[SampleProduct]:
         if gse_dir.name.endswith("_tea_seq"):
             continue
         for sample_dir in sorted(path for path in gse_dir.iterdir() if path.is_dir()):
+            if selected is not None and (gse_dir.name, sample_dir.name) not in selected:
+                continue
             if sample_dir.name == "qc_audit" or not (sample_dir / "validation_result.csv").exists():
                 continue
             samples.append(
@@ -331,11 +334,13 @@ def discover_co_modality(source_root: Path, product: str, required: tuple[str, .
     return samples
 
 
-def discover_product(output_root: Path, product: str) -> list[SampleProduct]:
+def discover_product(
+    output_root: Path, product: str, atac_workbook: Path | None = None
+) -> list[SampleProduct]:
     if product == "only_rna":
         return discover_only_rna(output_root)
     if product == "only_atac":
-        return discover_only_atac(output_root)
+        return discover_only_atac(output_root, atac_workbook=atac_workbook)
     if product == "co_atac":
         return discover_co_atac(output_root)
     if product == "co_rna":
@@ -435,10 +440,15 @@ def add_traceability(meta: pd.DataFrame, row: dict[str, object]) -> pd.DataFrame
 
 
 def read_sample_metadata(sample: SampleProduct, row: dict[str, object]) -> pd.DataFrame:
-    metadata_path = sample.source_dir / "metadata_qc.csv"
-    if not metadata_path.exists() and sample.modality == "ATAC":
-        metadata_path = sample.source_dir / "validation_result.csv"
-    meta = pd.read_csv(metadata_path, low_memory=False)
+    h5ad_path = sample.source_dir / f"{sample.sample_id}.h5ad"
+    if h5ad_path.exists():
+        h5ad = ad.read_h5ad(h5ad_path)
+        meta = pd.DataFrame(h5ad.obs.copy()).reset_index(drop=True)
+    else:
+        metadata_path = sample.source_dir / "metadata_qc.csv"
+        if not metadata_path.exists() and sample.modality == "ATAC":
+            metadata_path = sample.source_dir / "validation_result.csv"
+        meta = pd.read_csv(metadata_path, low_memory=False)
     return add_traceability(meta, row)
 
 
@@ -521,13 +531,14 @@ def organize_product(
     leiden_resolution: float,
     rna_min_cima_l1_score: float,
     include_incomplete: bool,
+    atac_workbook: Path | None = None,
 ) -> dict[str, object]:
     product_dir = output_root / PRODUCT_DIRS[product]
     ensure_clean_product_dir(product_dir, force)
     for name in ["manifests", "qc", "figures", "samples"]:
         (product_dir / name).mkdir(parents=True, exist_ok=True)
 
-    samples = discover_product(output_root, product)
+    samples = discover_product(output_root, product, atac_workbook=atac_workbook)
     rows = []
     cell_parts = []
     complete_samples = []

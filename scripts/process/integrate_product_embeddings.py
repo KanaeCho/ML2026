@@ -73,8 +73,11 @@ def project_rna_sample(sample_dir: Path, sample_id: str, feature_model: pd.DataF
         raise FileNotFoundError(h5ad_path)
 
     adata = ad.read_h5ad(h5ad_path)
-    pass_mask = adata.obs["pass_qc"].fillna(False).astype(bool).to_numpy()
-    pass_adata = adata[pass_mask]
+    if "pass_qc" in adata.obs.columns:
+        pass_mask = adata.obs["pass_qc"].fillna(False).astype(bool).to_numpy()
+        pass_adata = adata[pass_mask]
+    else:
+        pass_adata = adata
     reference_features = feature_model["feature_id"].astype(str).tolist()
     dim_cols = [c for c in feature_model.columns if c.startswith("pc_dim_")][:n_components]
     loadings = feature_model[dim_cols].to_numpy(dtype=np.float32)
@@ -170,14 +173,11 @@ def assign_rna_cima_labels_from_embedding(
 
 
 def project_atac_sample(sample_dir: Path, metadata: pd.DataFrame, feature_model: pd.DataFrame, n_components: int) -> np.ndarray:
-    matrix_dir = sample_dir / "matrix"
-    matrix_path = matrix_dir / "matrix.mtx"
-    features_path = matrix_dir / "features.tsv.gz"
-    barcodes_path = matrix_dir / "barcodes.tsv.gz"
-    if not features_path.exists():
-        features_path = matrix_dir / "features.tsv"
-    if not barcodes_path.exists():
-        barcodes_path = matrix_dir / "barcodes.tsv"
+    sample_id = sample_dir.name
+    h5ad_path = sample_dir / f"{sample_id}.h5ad"
+    if not h5ad_path.exists():
+        raise FileNotFoundError(h5ad_path)
+    adata = ad.read_h5ad(h5ad_path)
 
     feature_index = feature_model["feature_index"].astype(int).to_numpy() - 1
     feature_id = feature_model["feature_id"].astype(str).to_numpy()
@@ -185,17 +185,21 @@ def project_atac_sample(sample_dir: Path, metadata: pd.DataFrame, feature_model:
     idf = feature_model["idf"].to_numpy(dtype=np.float32)
     loadings = feature_model[dim_cols].to_numpy(dtype=np.float32)
 
-    observed_features = np.asarray(read_lines(features_path), dtype=str)[feature_index]
+    if "feature_id" in adata.var.columns:
+        var_features = adata.var["feature_id"].astype(str).to_numpy()
+    else:
+        var_features = adata.var_names.astype(str).to_numpy()
+    observed_features = np.asarray(var_features, dtype=str)[feature_index]
     if not np.array_equal(observed_features, feature_id):
         raise ValueError(f"ATAC feature mismatch in {sample_dir}")
 
-    barcodes = read_lines(barcodes_path)
+    barcodes = adata.obs_names.astype(str).tolist()
     barcode_lookup = {barcode: i for i, barcode in enumerate(barcodes)}
     cell_barcodes = metadata["source_cell_id"].astype(str).tolist()
     cell_indices = [barcode_lookup[barcode] for barcode in cell_barcodes]
 
-    matrix = sp.csr_matrix(scipy.io.mmread(matrix_path), dtype=np.float32)
-    selected = matrix[feature_index, :][:, cell_indices]
+    matrix = sp.csr_matrix(adata.X, dtype=np.float32)
+    selected = matrix[cell_indices, :][:, feature_index].T
     selected = sp.csc_matrix(selected, dtype=np.float32, copy=True)
     if selected.nnz:
         selected.data[:] = 1.0
